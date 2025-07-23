@@ -1,0 +1,10 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "expo-dji-sdk": ["../src/index"],
+      "expo-dji-sdk/*": ["../src/*"]
+    }
+  }
+}
