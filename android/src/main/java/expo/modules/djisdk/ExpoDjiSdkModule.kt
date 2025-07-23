@@ -1,50 +1,110 @@
 package expo.modules.djisdk
 
+import android.content.Context
+import dji.v5.common.error.IDJIError
+import dji.v5.common.register.DJISDKInitEvent
+import dji.v5.manager.SDKManager
+import dji.v5.manager.interfaces.SDKManagerCallback
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import java.net.URL
+import expo.modules.kotlin.Promise
 
 class ExpoDjiSdkModule : Module() {
-  // Each module class must implement the definition function. The definition consists of components
-  // that describes the module's functionality and behavior.
-  // See https://docs.expo.dev/modules/module-api for more details about available components.
+  private val context: Context
+    get() = requireNotNull(appContext.reactContext)
+
   override fun definition() = ModuleDefinition {
-    // Sets the name of the module that JavaScript code will use to refer to the module. Takes a string as an argument.
-    // Can be inferred from module's class name, but it's recommended to set it explicitly for clarity.
-    // The module will be accessible from `requireNativeModule('ExpoDjiSdk')` in JavaScript.
     Name("ExpoDjiSdk")
 
-    // Sets constant properties on the module. Can take a dictionary or a closure that returns a dictionary.
-    Constants(
-      "PI" to Math.PI
-    )
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate")
 
-    // Defines event names that the module can send to JavaScript.
-    Events("onChange")
+    AsyncFunction("initializeSDK") { appKey: String, promise: Promise ->
+      try {
+        SDKManager.getInstance().init(context, object : SDKManagerCallback {
+          override fun onRegisterSuccess() {
+            promise.resolve(mapOf(
+              "success" to true,
+              "message" to "SDK initialized and registered successfully",
+              "isRegistered" to true,
+              "sdkVersion" to SDKManager.getInstance().sdkVersion
+            ))
+          }
 
-    // Defines a JavaScript synchronous function that runs the native code on the JavaScript thread.
-    Function("hello") {
-      "Hello world! 👋"
-    }
+          override fun onRegisterFailure(error: IDJIError) {
+            promise.reject("REGISTRATION_ERROR", "Failed to register app: ${error.description()}", null)
+          }
 
-    // Defines a JavaScript function that always returns a Promise and whose native code
-    // is by default dispatched on the different thread than the JavaScript runtime runs on.
-    AsyncFunction("setValueAsync") { value: String ->
-      // Send an event to JavaScript.
-      sendEvent("onChange", mapOf(
-        "value" to value
-      ))
-    }
+          override fun onProductDisconnect(productId: Int) {
+            sendEvent("onDroneConnectionChange", mapOf(
+              "connected" to false,
+              "productId" to productId
+            ))
+          }
 
-    // Enables the module to be used as a native view. Definition components that are accepted as part of
-    // the view definition: Prop, Events.
-    View(ExpoDjiSdkView::class) {
-      // Defines a setter for the `url` prop.
-      Prop("url") { view: ExpoDjiSdkView, url: URL ->
-        view.webView.loadUrl(url.toString())
+          override fun onProductConnect(productId: Int) {
+            sendEvent("onDroneConnectionChange", mapOf(
+              "connected" to true,
+              "productId" to productId
+            ))
+            
+            getDroneBasicInfo()
+          }
+
+          override fun onProductChanged(productId: Int) {
+            getDroneBasicInfo()
+          }
+
+          override fun onInitProcess(event: DJISDKInitEvent, totalProcess: Int) {
+            if (event == DJISDKInitEvent.INITIALIZE_COMPLETE) {
+              SDKManager.getInstance().registerApp()
+            }
+          }
+
+          override fun onDatabaseDownloadProgress(current: Long, total: Long) {
+            // Handle database download progress if needed
+          }
+        })
+      } catch (e: Exception) {
+        promise.reject("INIT_ERROR", "Failed to initialize SDK: ${e.message}", e)
       }
-      // Defines an event that the view can send to JavaScript.
-      Events("onLoad")
+    }
+
+    AsyncFunction("isDroneConnected") { promise: Promise ->
+      try {
+        val isConnected = SDKManager.getInstance().isRegistered
+        promise.resolve(isConnected)
+      } catch (e: Exception) {
+        promise.reject("CONNECTION_CHECK_ERROR", "Failed to check drone connection: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getDroneInfo") { promise: Promise ->
+      try {
+        getDroneBasicInfo()
+        promise.resolve(true)
+      } catch (e: Exception) {
+        promise.reject("INFO_ERROR", "Failed to get drone info: ${e.message}", e)
+      }
+    }
+  }
+
+  private fun getDroneBasicInfo() {
+    try {
+      val droneInfo = mapOf(
+        "sdkVersion" to SDKManager.getInstance().sdkVersion,
+        "isRegistered" to SDKManager.getInstance().isRegistered
+      )
+
+      sendEvent("onDroneInfoUpdate", mapOf(
+        "type" to "basicInfo",
+        "data" to droneInfo
+      ))
+
+    } catch (e: Exception) {
+      sendEvent("onDroneInfoUpdate", mapOf(
+        "type" to "error",
+        "error" to "Failed to get drone info: ${e.message}"
+      ))
     }
   }
 }

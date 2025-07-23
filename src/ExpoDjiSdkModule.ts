@@ -1,11 +1,11 @@
 import { NativeModule, requireNativeModule } from 'expo';
 
-import { ExpoDjiSdkModuleEvents } from './ExpoDjiSdk.types';
+import { ExpoDjiSdkModuleEvents, SDKInitializationResult } from './ExpoDjiSdk.types';
 
 declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
-  PI: number;
-  hello(): string;
-  setValueAsync(value: string): Promise<void>;
+  initializeSDK(appKey: string): Promise<SDKInitializationResult>;
+  isDroneConnected(): Promise<boolean>;
+  getDroneInfo(): Promise<boolean>;
 }
 
 // This call loads the native module object from the JSI.

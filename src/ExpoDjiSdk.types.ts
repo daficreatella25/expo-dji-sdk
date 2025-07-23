@@ -1,15 +1,46 @@
 import type { StyleProp, ViewStyle } from 'react-native';
 
-export type OnLoadEventPayload = {
-  url: string;
+export type SDKInitializationResult = {
+  success: boolean;
+  message: string;
+  isRegistered: boolean;
+  sdkVersion: string;
+};
+
+export type DroneConnectionPayload = {
+  connected: boolean;
+  productId?: number;
+};
+
+export type DroneHealthInfo = {
+  componentIndex: number;
+  componentType: string;
+  currentWarningLevel: string;
+  warningMessages: string[];
+};
+
+export type DroneInfo = {
+  productId?: number;
+  productCategory?: string;
+  sdkVersion: string;
+  isRegistered: boolean;
+  healthInfo?: DroneHealthInfo[];
+};
+
+export type DroneInfoUpdatePayload = {
+  type: 'basicInfo' | 'healthInfo' | 'error';
+  data?: DroneInfo;
+  error?: string;
 };
 
 export type ExpoDjiSdkModuleEvents = {
-  onChange: (params: ChangeEventPayload) => void;
+  onSDKRegistrationResult: (params: SDKInitializationResult) => void;
+  onDroneConnectionChange: (params: DroneConnectionPayload) => void;
+  onDroneInfoUpdate: (params: DroneInfoUpdatePayload) => void;
 };
 
-export type ChangeEventPayload = {
-  value: string;
+export type OnLoadEventPayload = {
+  url: string;
 };
 
 export type ExpoDjiSdkViewProps = {

@@ -30,6 +30,9 @@ allprojects {
     google()
     mavenCentral()
     maven { url 'https://www.jitpack.io' }
+    maven {
+      url "https://artifact.dji-innovations.com/repository/registry/"
+    }
   }
 }
 

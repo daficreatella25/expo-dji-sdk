@@ -1,37 +1,125 @@
 import { useEvent } from 'expo';
-import ExpoDjiSdk, { ExpoDjiSdkView } from 'expo-dji-sdk';
-import { Button, SafeAreaView, ScrollView, Text, View } from 'react-native';
+import ExpoDjiSdk from 'expo-dji-sdk';
+import { Button, SafeAreaView, ScrollView, Text, View, Alert } from 'react-native';
+import { useState, useEffect } from 'react';
+
+const APP_KEY = '6464ccd90e7ed2835d025f4d';
 
 export default function App() {
-  const onChangePayload = useEvent(ExpoDjiSdk, 'onChange');
+  const [sdkInitialized, setSdkInitialized] = useState(false);
+  const [droneConnected, setDroneConnected] = useState(false);
+  const [droneInfo, setDroneInfo] = useState<any>(null);
+  const [initResult, setInitResult] = useState<string>('');
+
+  const onDroneConnectionChange = useEvent(ExpoDjiSdk, 'onDroneConnectionChange');
+  const onDroneInfoUpdate = useEvent(ExpoDjiSdk, 'onDroneInfoUpdate');
+
+  useEffect(() => {
+    if (onDroneConnectionChange) {
+      setDroneConnected(onDroneConnectionChange.connected);
+      console.log('Drone connection changed:', onDroneConnectionChange);
+    }
+  }, [onDroneConnectionChange]);
+
+  useEffect(() => {
+    if (onDroneInfoUpdate) {
+      console.log('Drone info update:', onDroneInfoUpdate);
+      if (onDroneInfoUpdate.type === 'basicInfo' || onDroneInfoUpdate.type === 'healthInfo') {
+        setDroneInfo(onDroneInfoUpdate.data);
+      } else if (onDroneInfoUpdate.type === 'error') {
+        Alert.alert('Error', onDroneInfoUpdate.error || 'Unknown error');
+      }
+    }
+  }, [onDroneInfoUpdate]);
+
+  const initializeSDK = async () => {
+    try {
+      const result = await ExpoDjiSdk.initializeSDK(APP_KEY);
+      setSdkInitialized(result.success);
+      setInitResult(JSON.stringify(result, null, 2));
+      if (result.success) {
+        Alert.alert('Success', 'DJI SDK initialized successfully!');
+      } else {
+        Alert.alert('Error', result.message);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to initialize SDK');
+      setInitResult(`Error: ${error.message}`);
+    }
+  };
+
+  const checkDroneConnection = async () => {
+    try {
+      const connected = await ExpoDjiSdk.isDroneConnected();
+      setDroneConnected(connected);
+      Alert.alert('Connection Status', connected ? 'Drone is connected' : 'No drone connected');
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to check connection');
+    }
+  };
+
+  const getDroneInfo = async () => {
+    try {
+      await ExpoDjiSdk.getDroneInfo();
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to get drone info');
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView style={styles.container}>
-        <Text style={styles.header}>Module API Example</Text>
-        <Group name="Constants">
-          <Text>{ExpoDjiSdk.PI}</Text>
-        </Group>
-        <Group name="Functions">
-          <Text>{ExpoDjiSdk.hello()}</Text>
-        </Group>
-        <Group name="Async functions">
+        <Text style={styles.header}>DJI SDK Example</Text>
+        
+        <Group name="SDK Initialization">
           <Button
-            title="Set value"
-            onPress={async () => {
-              await ExpoDjiSdk.setValueAsync('Hello from JS!');
-            }}
+            title="Initialize DJI SDK"
+            onPress={initializeSDK}
+            disabled={sdkInitialized}
           />
+          <Text style={styles.status}>
+            Status: {sdkInitialized ? 'Initialized' : 'Not Initialized'}
+          </Text>
+          {initResult ? (
+            <Text style={styles.result}>{initResult}</Text>
+          ) : null}
         </Group>
-        <Group name="Events">
-          <Text>{onChangePayload?.value}</Text>
-        </Group>
-        <Group name="Views">
-          <ExpoDjiSdkView
-            url="https://www.example.com"
-            onLoad={({ nativeEvent: { url } }) => console.log(`Loaded: ${url}`)}
-            style={styles.view}
+
+        <Group name="Drone Connection">
+          <Button
+            title="Check Drone Connection"
+            onPress={checkDroneConnection}
+            disabled={!sdkInitialized}
           />
+          <Text style={styles.status}>
+            Connection: {droneConnected ? 'Connected' : 'Disconnected'}
+          </Text>
+        </Group>
+
+        <Group name="Drone Information">
+          <Button
+            title="Get Drone Info"
+            onPress={getDroneInfo}
+            disabled={!sdkInitialized || !droneConnected}
+          />
+          {droneInfo ? (
+            <View style={styles.infoContainer}>
+              <Text style={styles.infoText}>Product ID: {droneInfo.productId || 'N/A'}</Text>
+              <Text style={styles.infoText}>Category: {droneInfo.productCategory || 'N/A'}</Text>
+              <Text style={styles.infoText}>SDK Version: {droneInfo.sdkVersion || 'N/A'}</Text>
+              <Text style={styles.infoText}>Registered: {droneInfo.isRegistered ? 'Yes' : 'No'}</Text>
+              {droneInfo.healthInfo && droneInfo.healthInfo.length > 0 && (
+                <View style={styles.healthContainer}>
+                  <Text style={styles.infoText}>Health Info:</Text>
+                  {droneInfo.healthInfo.map((health: any, index: number) => (
+                    <Text key={index} style={styles.healthText}>
+                      {health.componentType}: {health.currentWarningLevel}
+                    </Text>
+                  ))}
+                </View>
+              )}
+            </View>
+          ) : null}
         </Group>
       </ScrollView>
     </SafeAreaView>
@@ -51,10 +139,13 @@ const styles = {
   header: {
     fontSize: 30,
     margin: 20,
+    textAlign: 'center' as const,
+    fontWeight: 'bold' as const,
   },
   groupHeader: {
     fontSize: 20,
     marginBottom: 20,
+    fontWeight: 'bold' as const,
   },
   group: {
     margin: 20,
@@ -66,8 +157,38 @@ const styles = {
     flex: 1,
     backgroundColor: '#eee',
   },
-  view: {
-    flex: 1,
-    height: 200,
+  status: {
+    fontSize: 16,
+    marginTop: 10,
+    fontWeight: 'bold' as const,
+  },
+  result: {
+    fontSize: 12,
+    marginTop: 10,
+    backgroundColor: '#f5f5f5',
+    padding: 10,
+    borderRadius: 5,
+    fontFamily: 'monospace' as const,
+  },
+  infoContainer: {
+    marginTop: 10,
+    padding: 10,
+    backgroundColor: '#f9f9f9',
+    borderRadius: 5,
+  },
+  infoText: {
+    fontSize: 14,
+    marginBottom: 5,
+  },
+  healthContainer: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#ddd',
+  },
+  healthText: {
+    fontSize: 12,
+    marginLeft: 10,
+    color: '#666',
   },
 };
