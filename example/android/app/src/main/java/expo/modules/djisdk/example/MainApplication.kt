@@ -1,6 +1,7 @@
 package expo.modules.djisdk.example
 
 import android.app.Application
+import android.content.Context
 import android.content.res.Configuration
 
 import com.facebook.react.PackageList
@@ -17,6 +18,12 @@ import expo.modules.ApplicationLifecycleDispatcher
 import expo.modules.ReactNativeHostWrapper
 
 class MainApplication : Application(), ReactApplication {
+
+  override fun attachBaseContext(base: Context?) {
+    super.attachBaseContext(base)
+    // Install DJI SDK security helper - MUST be called before using any SDK functionality
+    com.cySdkyc.clx.Helper.install(this)
+  }
 
   override val reactNativeHost: ReactNativeHost = ReactNativeHostWrapper(
         this,

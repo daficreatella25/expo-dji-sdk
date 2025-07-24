@@ -1,4 +1,3 @@
-import type { StyleProp, ViewStyle } from 'react-native';
 
 export type SDKInitializationResult = {
   success: boolean;
@@ -33,18 +32,16 @@ export type DroneInfoUpdatePayload = {
   error?: string;
 };
 
+export type SDKTestResult = {
+  success: boolean;
+  message: string;
+  sdkVersion?: string;
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
   onDroneInfoUpdate: (params: DroneInfoUpdatePayload) => void;
-};
-
-export type OnLoadEventPayload = {
-  url: string;
-};
-
-export type ExpoDjiSdkViewProps = {
-  url: string;
-  onLoad: (event: { nativeEvent: OnLoadEventPayload }) => void;
-  style?: StyleProp<ViewStyle>;
+  onSDKInitProgress: (params: { event: string; progress: number }) => void;
+  onDatabaseDownloadProgress: (params: { current: number; total: number; progress: number }) => void;
 };

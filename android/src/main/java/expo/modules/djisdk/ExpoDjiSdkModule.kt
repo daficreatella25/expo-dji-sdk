@@ -1,6 +1,7 @@
 package expo.modules.djisdk
 
 import android.content.Context
+import android.util.Log
 import dji.v5.common.error.IDJIError
 import dji.v5.common.register.DJISDKInitEvent
 import dji.v5.manager.SDKManager
@@ -10,16 +11,38 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
 
 class ExpoDjiSdkModule : Module() {
+  companion object {
+    private const val TAG = "ExpoDjiSdk"
+  }
+  
   private val context: Context
     get() = requireNotNull(appContext.reactContext)
 
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress")
 
-    AsyncFunction("initializeSDK") { appKey: String, promise: Promise ->
+    AsyncFunction("testSDKClass") { promise: Promise ->
       try {
+        Log.d(TAG, "Testing DJI SDK class loading...")
+        val sdkManager = SDKManager.getInstance()
+        Log.d(TAG, "SDKManager instance obtained successfully")
+        promise.resolve(mapOf(
+          "success" to true,
+          "message" to "SDK classes loaded successfully",
+          "sdkVersion" to sdkManager.sdkVersion
+        ))
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to load SDK classes: ${e.message}", e)
+        promise.reject("CLASS_NOT_FOUND", "Failed to load DJI SDK classes: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("initializeSDK") { promise: Promise ->
+      try {
+        Log.d(TAG, "Starting SDK initialization...")
+        // Initialize SDK first
         SDKManager.getInstance().init(context, object : SDKManagerCallback {
           override fun onRegisterSuccess() {
             promise.resolve(mapOf(
@@ -55,13 +78,27 @@ class ExpoDjiSdkModule : Module() {
           }
 
           override fun onInitProcess(event: DJISDKInitEvent, totalProcess: Int) {
-            if (event == DJISDKInitEvent.INITIALIZE_COMPLETE) {
-              SDKManager.getInstance().registerApp()
+            when (event) {
+              DJISDKInitEvent.INITIALIZE_COMPLETE -> {
+                // SDK initialization completed, now register the app
+                SDKManager.getInstance().registerApp()
+              }
+              else -> {
+                // Log other init events for debugging
+                sendEvent("onSDKInitProgress", mapOf(
+                  "event" to event.name,
+                  "progress" to totalProcess
+                ))
+              }
             }
           }
 
           override fun onDatabaseDownloadProgress(current: Long, total: Long) {
-            // Handle database download progress if needed
+            sendEvent("onDatabaseDownloadProgress", mapOf(
+              "current" to current,
+              "total" to total,
+              "progress" to if (total > 0) (current.toDouble() / total.toDouble() * 100).toInt() else 0
+            ))
           }
         })
       } catch (e: Exception) {

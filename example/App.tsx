@@ -1,5 +1,5 @@
 import { useEvent } from 'expo';
-import ExpoDjiSdk from 'expo-dji-sdk';
+import ExpoDjiSdk, { testSDKClass, initializeSDK } from 'expo-dji-sdk';
 import { Button, SafeAreaView, ScrollView, Text, View, Alert } from 'react-native';
 import { useState, useEffect } from 'react';
 
@@ -10,6 +10,7 @@ export default function App() {
   const [droneConnected, setDroneConnected] = useState(false);
   const [droneInfo, setDroneInfo] = useState<any>(null);
   const [initResult, setInitResult] = useState<string>('');
+  const [testResult, setTestResult] = useState<string>('');
 
   const onDroneConnectionChange = useEvent(ExpoDjiSdk, 'onDroneConnectionChange');
   const onDroneInfoUpdate = useEvent(ExpoDjiSdk, 'onDroneInfoUpdate');
@@ -32,9 +33,29 @@ export default function App() {
     }
   }, [onDroneInfoUpdate]);
 
-  const initializeSDK = async () => {
+  const testSDKClasses = async () => {
     try {
-      const result = await ExpoDjiSdk.initializeSDK(APP_KEY);
+      console.log('Testing SDK classes...');
+      const result = await testSDKClass();
+      console.log('SDK Class Test Result:', result);
+      setTestResult(JSON.stringify(result, null, 2));
+      if (result.success) {
+        Alert.alert('Success', `SDK classes loaded successfully!\nVersion: ${result.sdkVersion}`);
+      } else {
+        Alert.alert('Error', result.message);
+      }
+    } catch (error: any) {
+      console.error('SDK Class Test Error:', error);
+      Alert.alert('Error', error.message || 'Failed to test SDK classes');
+      setTestResult(`Error: ${error.message}`);
+    }
+  };
+
+  const initializeDJISDK = async () => {
+    try {
+      console.log('Initializing SDK...');
+      const result = await initializeSDK();
+      console.log('SDK Init Result:', result);
       setSdkInitialized(result.success);
       setInitResult(JSON.stringify(result, null, 2));
       if (result.success) {
@@ -43,6 +64,7 @@ export default function App() {
         Alert.alert('Error', result.message);
       }
     } catch (error: any) {
+      console.error('SDK Init Error:', error);
       Alert.alert('Error', error.message || 'Failed to initialize SDK');
       setInitResult(`Error: ${error.message}`);
     }
@@ -71,10 +93,20 @@ export default function App() {
       <ScrollView style={styles.container}>
         <Text style={styles.header}>DJI SDK Example</Text>
         
+        <Group name="SDK Testing">
+          <Button
+            title="Test SDK Classes"
+            onPress={testSDKClasses}
+          />
+          {testResult ? (
+            <Text style={styles.result}>{testResult}</Text>
+          ) : null}
+        </Group>
+
         <Group name="SDK Initialization">
           <Button
             title="Initialize DJI SDK"
-            onPress={initializeSDK}
+            onPress={initializeDJISDK}
             disabled={sdkInitialized}
           />
           <Text style={styles.status}>
