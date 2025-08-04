@@ -10,3 +10,4 @@ export const testSDKClass = () => ExpoDjiSdkModule.testSDKClass();
 export const initializeSDK = () => ExpoDjiSdkModule.initializeSDK();
 export const isDroneConnected = () => ExpoDjiSdkModule.isDroneConnected();
 export const getDroneInfo = () => ExpoDjiSdkModule.getDroneInfo();
+export const getDetailedDroneInfo = () => ExpoDjiSdkModule.getDetailedDroneInfo();

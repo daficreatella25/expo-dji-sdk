@@ -11,6 +11,10 @@ import dji.v5.manager.aircraft.virtualstick.VirtualStickManager
 import dji.v5.manager.aircraft.virtualstick.VirtualStickStateListener
 import dji.v5.manager.aircraft.virtualstick.VirtualStickState
 import dji.sdk.keyvalue.value.flightcontroller.FlightControlAuthorityChangeReason
+import dji.sdk.keyvalue.key.ProductKey
+import dji.sdk.keyvalue.key.FlightControllerKey
+import dji.v5.et.create
+import dji.v5.et.get
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
@@ -25,6 +29,7 @@ class ExpoDjiSdkModule : Module() {
   
   private var isProductConnected = false
   private var currentVirtualStickState: VirtualStickState? = null
+  private var currentProductId: Int = -1
 
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
@@ -68,6 +73,7 @@ class ExpoDjiSdkModule : Module() {
           override fun onProductDisconnect(productId: Int) {
             isProductConnected = false
             currentVirtualStickState = null
+            currentProductId = -1
             sendEvent("onDroneConnectionChange", mapOf(
               "connected" to false,
               "productId" to productId
@@ -76,6 +82,7 @@ class ExpoDjiSdkModule : Module() {
 
           override fun onProductConnect(productId: Int) {
             isProductConnected = true
+            currentProductId = productId
             sendEvent("onDroneConnectionChange", mapOf(
               "connected" to true,
               "productId" to productId
@@ -193,6 +200,78 @@ class ExpoDjiSdkModule : Module() {
         }
       } catch (e: Exception) {
         promise.reject("VIRTUAL_STICK_STATE_ERROR", "Failed to get virtual stick state: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getDetailedDroneInfo") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        val productInfo = mutableMapOf<String, Any?>()
+        
+        // Get product type
+        ProductKey.KeyProductType.create().get(
+          onSuccess = { productType ->
+            productInfo["productType"] = productType?.name ?: "UNKNOWN"
+            
+            // Get firmware version
+            ProductKey.KeyFirmwareVersion.create().get(
+              onSuccess = { firmwareVersion ->
+                productInfo["firmwareVersion"] = firmwareVersion ?: "UNKNOWN"
+                
+                // Get serial number
+                FlightControllerKey.KeySerialNumber.create().get(
+                  onSuccess = { serialNumber ->
+                    productInfo["serialNumber"] = serialNumber ?: "UNKNOWN"
+                    
+                    // Get additional info
+                    productInfo["productId"] = currentProductId
+                    productInfo["sdkVersion"] = SDKManager.getInstance().sdkVersion
+                    productInfo["isRegistered"] = SDKManager.getInstance().isRegistered
+                    productInfo["isConnected"] = isProductConnected
+                    
+                    promise.resolve(productInfo)
+                  },
+                  onFailure = { error ->
+                    productInfo["serialNumber"] = "UNAVAILABLE"
+                    productInfo["productId"] = currentProductId
+                    productInfo["sdkVersion"] = SDKManager.getInstance().sdkVersion
+                    productInfo["isRegistered"] = SDKManager.getInstance().isRegistered
+                    productInfo["isConnected"] = isProductConnected
+                    
+                    promise.resolve(productInfo)
+                  }
+                )
+              },
+              onFailure = { error ->
+                productInfo["firmwareVersion"] = "UNAVAILABLE"
+                productInfo["serialNumber"] = "UNAVAILABLE"
+                productInfo["productId"] = currentProductId
+                productInfo["sdkVersion"] = SDKManager.getInstance().sdkVersion
+                productInfo["isRegistered"] = SDKManager.getInstance().isRegistered
+                productInfo["isConnected"] = isProductConnected
+                
+                promise.resolve(productInfo)
+              }
+            )
+          },
+          onFailure = { error ->
+            productInfo["productType"] = "UNAVAILABLE"
+            productInfo["firmwareVersion"] = "UNAVAILABLE"
+            productInfo["serialNumber"] = "UNAVAILABLE"
+            productInfo["productId"] = currentProductId
+            productInfo["sdkVersion"] = SDKManager.getInstance().sdkVersion
+            productInfo["isRegistered"] = SDKManager.getInstance().isRegistered
+            productInfo["isConnected"] = isProductConnected
+            
+            promise.resolve(productInfo)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("PRODUCT_INFO_ERROR", "Failed to get product info: ${e.message}", e)
       }
     }
   }
