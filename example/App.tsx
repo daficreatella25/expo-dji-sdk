@@ -1,5 +1,5 @@
 import { useEvent } from 'expo';
-import ExpoDjiSdk, { testSDKClass, initializeSDK } from 'expo-dji-sdk';
+import ExpoDjiSdk, { testSDKClass, initializeSDK, DroneConnectionStatus } from 'expo-dji-sdk';
 import { Button, SafeAreaView, ScrollView, Text, View, Alert } from 'react-native';
 import { useState, useEffect } from 'react';
 
@@ -8,6 +8,7 @@ const APP_KEY = '6464ccd90e7ed2835d025f4d';
 export default function App() {
   const [sdkInitialized, setSdkInitialized] = useState(false);
   const [droneConnected, setDroneConnected] = useState(false);
+  const [droneConnectionStatus, setDroneConnectionStatus] = useState<DroneConnectionStatus | null>(null);
   const [droneInfo, setDroneInfo] = useState<any>(null);
   const [initResult, setInitResult] = useState<string>('');
   const [testResult, setTestResult] = useState<string>('');
@@ -72,9 +73,13 @@ export default function App() {
 
   const checkDroneConnection = async () => {
     try {
-      const connected = await ExpoDjiSdk.isDroneConnected();
-      setDroneConnected(connected);
-      Alert.alert('Connection Status', connected ? 'Drone is connected' : 'No drone connected');
+      const status = await ExpoDjiSdk.isDroneConnected();
+      setDroneConnectionStatus(status);
+      setDroneConnected(status.connected);
+      Alert.alert(
+        'Connection Status', 
+        `Connected: ${status.connected}\nSDK Registered: ${status.sdkRegistered}\nProduct Connected: ${status.productConnected}\nProduct Type: ${status.productType}`
+      );
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to check connection');
     }
@@ -126,6 +131,13 @@ export default function App() {
           <Text style={styles.status}>
             Connection: {droneConnected ? 'Connected' : 'Disconnected'}
           </Text>
+          {droneConnectionStatus && (
+            <View style={styles.statusDetails}>
+              <Text style={styles.statusText}>SDK Registered: {droneConnectionStatus.sdkRegistered ? 'Yes' : 'No'}</Text>
+              <Text style={styles.statusText}>Product Connected: {droneConnectionStatus.productConnected ? 'Yes' : 'No'}</Text>
+              <Text style={styles.statusText}>Product Type: {droneConnectionStatus.productType}</Text>
+            </View>
+          )}
         </Group>
 
         <Group name="Drone Information">
@@ -188,6 +200,7 @@ const styles = {
   container: {
     flex: 1,
     backgroundColor: '#eee',
+    paddingBottom: 50,
   },
   status: {
     fontSize: 16,
@@ -222,5 +235,15 @@ const styles = {
     fontSize: 12,
     marginLeft: 10,
     color: '#666',
+  },
+  statusDetails: {
+    marginTop: 10,
+    padding: 10,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 5,
+  },
+  statusText: {
+    fontSize: 14,
+    marginBottom: 3,
   },
 };

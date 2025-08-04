@@ -11,6 +11,13 @@ export type DroneConnectionPayload = {
   productId?: number;
 };
 
+export type DroneConnectionStatus = {
+  connected: boolean;
+  sdkRegistered: boolean;
+  productConnected: boolean;
+  productType: string;
+};
+
 export type DroneHealthInfo = {
   componentIndex: number;
   componentType: string;
@@ -38,10 +45,23 @@ export type SDKTestResult = {
   sdkVersion?: string;
 };
 
+export type VirtualStickState = {
+  isVirtualStickEnabled: boolean;
+  currentFlightControlAuthorityOwner: string;
+  isVirtualStickAdvancedModeEnabled: boolean;
+};
+
+export type VirtualStickStateChangePayload = {
+  type: 'stateUpdate' | 'authorityChange';
+  state?: VirtualStickState;
+  reason?: string;
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
   onDroneInfoUpdate: (params: DroneInfoUpdatePayload) => void;
   onSDKInitProgress: (params: { event: string; progress: number }) => void;
   onDatabaseDownloadProgress: (params: { current: number; total: number; progress: number }) => void;
+  onVirtualStickStateChange: (params: VirtualStickStateChangePayload) => void;
 };

@@ -4,8 +4,13 @@ import android.content.Context
 import android.util.Log
 import dji.v5.common.error.IDJIError
 import dji.v5.common.register.DJISDKInitEvent
+import dji.v5.common.callback.CommonCallbacks
 import dji.v5.manager.SDKManager
 import dji.v5.manager.interfaces.SDKManagerCallback
+import dji.v5.manager.aircraft.virtualstick.VirtualStickManager
+import dji.v5.manager.aircraft.virtualstick.VirtualStickStateListener
+import dji.v5.manager.aircraft.virtualstick.VirtualStickState
+import dji.sdk.keyvalue.value.flightcontroller.FlightControlAuthorityChangeReason
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
@@ -17,11 +22,14 @@ class ExpoDjiSdkModule : Module() {
   
   private val context: Context
     get() = requireNotNull(appContext.reactContext)
+  
+  private var isProductConnected = false
+  private var currentVirtualStickState: VirtualStickState? = null
 
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange")
 
     AsyncFunction("testSDKClass") { promise: Promise ->
       try {
@@ -58,6 +66,8 @@ class ExpoDjiSdkModule : Module() {
           }
 
           override fun onProductDisconnect(productId: Int) {
+            isProductConnected = false
+            currentVirtualStickState = null
             sendEvent("onDroneConnectionChange", mapOf(
               "connected" to false,
               "productId" to productId
@@ -65,11 +75,13 @@ class ExpoDjiSdkModule : Module() {
           }
 
           override fun onProductConnect(productId: Int) {
+            isProductConnected = true
             sendEvent("onDroneConnectionChange", mapOf(
               "connected" to true,
               "productId" to productId
             ))
             
+            setupVirtualStickListener()
             getDroneBasicInfo()
           }
 
@@ -108,8 +120,15 @@ class ExpoDjiSdkModule : Module() {
 
     AsyncFunction("isDroneConnected") { promise: Promise ->
       try {
-        val isConnected = SDKManager.getInstance().isRegistered
-        promise.resolve(isConnected)
+        val sdkRegistered = SDKManager.getInstance().isRegistered
+        val isConnected = sdkRegistered && isProductConnected
+        
+        promise.resolve(mapOf(
+          "connected" to isConnected,
+          "sdkRegistered" to sdkRegistered,
+          "productConnected" to isProductConnected,
+          "productType" to "UNKNOWN"
+        ))
       } catch (e: Exception) {
         promise.reject("CONNECTION_CHECK_ERROR", "Failed to check drone connection: ${e.message}", e)
       }
@@ -122,6 +141,86 @@ class ExpoDjiSdkModule : Module() {
       } catch (e: Exception) {
         promise.reject("INFO_ERROR", "Failed to get drone info: ${e.message}", e)
       }
+    }
+
+    AsyncFunction("enableVirtualStick") { promise: Promise ->
+      try {
+        VirtualStickManager.getInstance().enableVirtualStick(object : CommonCallbacks.CompletionCallback {
+          override fun onSuccess() {
+            promise.resolve(mapOf("success" to true))
+          }
+          
+          override fun onFailure(error: IDJIError) {
+            promise.reject("VIRTUAL_STICK_ERROR", "Failed to enable virtual stick: ${error.description()}", null)
+          }
+        })
+      } catch (e: Exception) {
+        promise.reject("VIRTUAL_STICK_ERROR", "Failed to enable virtual stick: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("disableVirtualStick") { promise: Promise ->
+      try {
+        VirtualStickManager.getInstance().disableVirtualStick(object : CommonCallbacks.CompletionCallback {
+          override fun onSuccess() {
+            promise.resolve(mapOf("success" to true))
+          }
+          
+          override fun onFailure(error: IDJIError) {
+            promise.reject("VIRTUAL_STICK_ERROR", "Failed to disable virtual stick: ${error.description()}", null)
+          }
+        })
+      } catch (e: Exception) {
+        promise.reject("VIRTUAL_STICK_ERROR", "Failed to disable virtual stick: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getVirtualStickState") { promise: Promise ->
+      try {
+        val state = currentVirtualStickState
+        if (state != null) {
+          promise.resolve(mapOf(
+            "isVirtualStickEnabled" to state.isVirtualStickEnable,
+            "currentFlightControlAuthorityOwner" to state.currentFlightControlAuthorityOwner.name,
+            "isVirtualStickAdvancedModeEnabled" to state.isVirtualStickAdvancedModeEnabled
+          ))
+        } else {
+          promise.resolve(mapOf(
+            "isVirtualStickEnabled" to false,
+            "currentFlightControlAuthorityOwner" to "UNKNOWN",
+            "isVirtualStickAdvancedModeEnabled" to false
+          ))
+        }
+      } catch (e: Exception) {
+        promise.reject("VIRTUAL_STICK_STATE_ERROR", "Failed to get virtual stick state: ${e.message}", e)
+      }
+    }
+  }
+
+  private fun setupVirtualStickListener() {
+    try {
+      VirtualStickManager.getInstance().setVirtualStickStateListener(object : VirtualStickStateListener {
+        override fun onVirtualStickStateUpdate(stickState: VirtualStickState) {
+          currentVirtualStickState = stickState
+          sendEvent("onVirtualStickStateChange", mapOf(
+            "type" to "stateUpdate",
+            "state" to mapOf(
+              "isVirtualStickEnabled" to stickState.isVirtualStickEnable,
+              "currentFlightControlAuthorityOwner" to stickState.currentFlightControlAuthorityOwner.name,
+              "isVirtualStickAdvancedModeEnabled" to stickState.isVirtualStickAdvancedModeEnabled
+            )
+          ))
+        }
+
+        override fun onChangeReasonUpdate(reason: FlightControlAuthorityChangeReason) {
+          sendEvent("onVirtualStickStateChange", mapOf(
+            "type" to "authorityChange",
+            "reason" to reason.name
+          ))
+        }
+      })
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to setup virtual stick listener: ${e.message}", e)
     }
   }
 
