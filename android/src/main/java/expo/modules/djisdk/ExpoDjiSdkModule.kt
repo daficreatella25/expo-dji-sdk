@@ -11,6 +11,12 @@ import dji.v5.manager.aircraft.virtualstick.VirtualStickManager
 import dji.v5.manager.aircraft.virtualstick.VirtualStickStateListener
 import dji.v5.manager.aircraft.virtualstick.VirtualStickState
 import dji.sdk.keyvalue.value.flightcontroller.FlightControlAuthorityChangeReason
+import dji.v5.manager.aircraft.simulator.SimulatorManager
+import dji.v5.manager.aircraft.simulator.SimulatorStatusListener
+import dji.v5.manager.aircraft.simulator.InitializationSettings
+import dji.sdk.keyvalue.value.common.LocationCoordinate2D
+import dji.sdk.keyvalue.value.common.EmptyMsg
+import dji.v5.et.action
 import dji.sdk.keyvalue.key.ProductKey
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.v5.et.create
@@ -30,11 +36,12 @@ class ExpoDjiSdkModule : Module() {
   private var isProductConnected = false
   private var currentVirtualStickState: VirtualStickState? = null
   private var currentProductId: Int = -1
+  private var simulatorStatusListener: SimulatorStatusListener? = null
 
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onSimulatorStateChange")
 
     AsyncFunction("testSDKClass") { promise: Promise ->
       try {
@@ -89,6 +96,7 @@ class ExpoDjiSdkModule : Module() {
             ))
             
             setupVirtualStickListener()
+            setupSimulatorListener()
             getDroneBasicInfo()
           }
 
@@ -274,6 +282,108 @@ class ExpoDjiSdkModule : Module() {
         promise.reject("PRODUCT_INFO_ERROR", "Failed to get product info: ${e.message}", e)
       }
     }
+
+    AsyncFunction("enableSimulator") { latitude: Double, longitude: Double, satelliteCount: Int, promise: Promise ->
+      try {
+        val coordinate = LocationCoordinate2D(latitude, longitude)
+        val initSettings = InitializationSettings.createInstance(coordinate, satelliteCount)
+        
+        SimulatorManager.getInstance().enableSimulator(initSettings, object : CommonCallbacks.CompletionCallback {
+          override fun onSuccess() {
+            promise.resolve(mapOf("success" to true))
+          }
+          
+          override fun onFailure(error: IDJIError) {
+            promise.reject("SIMULATOR_ERROR", "Failed to enable simulator: ${error.description()}", null)
+          }
+        })
+      } catch (e: Exception) {
+        promise.reject("SIMULATOR_ERROR", "Failed to enable simulator: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("disableSimulator") { promise: Promise ->
+      try {
+        SimulatorManager.getInstance().disableSimulator(object : CommonCallbacks.CompletionCallback {
+          override fun onSuccess() {
+            promise.resolve(mapOf("success" to true))
+          }
+          
+          override fun onFailure(error: IDJIError) {
+            promise.reject("SIMULATOR_ERROR", "Failed to disable simulator: ${error.description()}", null)
+          }
+        })
+      } catch (e: Exception) {
+        promise.reject("SIMULATOR_ERROR", "Failed to disable simulator: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("isSimulatorEnabled") { promise: Promise ->
+      try {
+        val isEnabled = SimulatorManager.getInstance().isSimulatorEnabled
+        promise.resolve(mapOf("enabled" to isEnabled))
+      } catch (e: Exception) {
+        promise.reject("SIMULATOR_STATE_ERROR", "Failed to get simulator state: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("setVirtualStickControlData") { leftHorizontal: Int, leftVertical: Int, rightHorizontal: Int, rightVertical: Int, promise: Promise ->
+      try {
+        val virtualStickManager = VirtualStickManager.getInstance()
+        virtualStickManager.leftStick.horizontalPosition = leftHorizontal
+        virtualStickManager.leftStick.verticalPosition = leftVertical
+        virtualStickManager.rightStick.horizontalPosition = rightHorizontal
+        virtualStickManager.rightStick.verticalPosition = rightVertical
+        promise.resolve(mapOf("success" to true))
+      } catch (e: Exception) {
+        promise.reject("VIRTUAL_STICK_CONTROL_ERROR", "Failed to set virtual stick control data: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("setVirtualStickSpeedLevel") { speedLevel: Double, promise: Promise ->
+      try {
+        VirtualStickManager.getInstance().speedLevel = speedLevel
+        promise.resolve(mapOf("success" to true))
+      } catch (e: Exception) {
+        promise.reject("VIRTUAL_STICK_SPEED_ERROR", "Failed to set virtual stick speed level: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("takeoff") { promise: Promise ->
+      try {
+        FlightControllerKey.KeyStartTakeoff.create().action({
+          promise.resolve(mapOf("success" to true))
+        }, { error: IDJIError ->
+          promise.reject("TAKEOFF_ERROR", "Failed to takeoff: ${error.description()}", null)
+        })
+      } catch (e: Exception) {
+        promise.reject("TAKEOFF_ERROR", "Failed to takeoff: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("land") { promise: Promise ->
+      try {
+        FlightControllerKey.KeyStartAutoLanding.create().action({
+          promise.resolve(mapOf("success" to true))
+        }, { error: IDJIError ->
+          promise.reject("LANDING_ERROR", "Failed to land: ${error.description()}", null)
+        })
+      } catch (e: Exception) {
+        promise.reject("LANDING_ERROR", "Failed to land: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("cancelLanding") { promise: Promise ->
+      try {
+        FlightControllerKey.KeyStopAutoLanding.create().action({
+          promise.resolve(mapOf("success" to true))
+        }, { error: IDJIError ->
+          promise.reject("CANCEL_LANDING_ERROR", "Failed to cancel landing: ${error.description()}", null)
+        })
+      } catch (e: Exception) {
+        promise.reject("CANCEL_LANDING_ERROR", "Failed to cancel landing: ${e.message}", e)
+      }
+    }
   }
 
   private fun setupVirtualStickListener() {
@@ -300,6 +410,40 @@ class ExpoDjiSdkModule : Module() {
       })
     } catch (e: Exception) {
       Log.e(TAG, "Failed to setup virtual stick listener: ${e.message}", e)
+    }
+  }
+
+  private fun setupSimulatorListener() {
+    try {
+      val listener = SimulatorStatusListener { state ->
+        sendEvent("onSimulatorStateChange", mapOf(
+          "type" to "stateUpdate",
+          "state" to mapOf(
+            "isEnabled" to SimulatorManager.getInstance().isSimulatorEnabled,
+            "areMotorsOn" to state.areMotorsOn(),
+            "isFlying" to state.isFlying,
+            "roll" to state.roll,
+            "pitch" to state.pitch,
+            "yaw" to state.yaw,
+            "positionX" to state.positionX,
+            "positionY" to state.positionY,
+            "positionZ" to state.positionZ,
+            "latitude" to state.location.latitude,
+            "longitude" to state.location.longitude,
+            "velocityX" to 0.0, // Not available in DJI V5 simulator
+            "velocityY" to 0.0, // Not available in DJI V5 simulator
+            "velocityZ" to 0.0, // Not available in DJI V5 simulator
+            "windSpeedX" to 0.0, // Not available in DJI V5 simulator
+            "windSpeedY" to 0.0, // Not available in DJI V5 simulator
+            "windSpeedZ" to 0.0, // Not available in DJI V5 simulator
+            "timestamp" to System.currentTimeMillis()
+          )
+        ))
+      }
+      simulatorStatusListener = listener
+      SimulatorManager.getInstance().addSimulatorStateListener(listener)
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to setup simulator listener: ${e.message}", e)
     }
   }
 

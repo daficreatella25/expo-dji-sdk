@@ -73,6 +73,45 @@ export type ExpoDjiSdkViewProps = {
   onLoad?: (event: { nativeEvent: { url: string } }) => void;
 };
 
+export type SimulatorState = {
+  isEnabled: boolean;
+  areMotorsOn: boolean;
+  isFlying: boolean;
+  roll: number;
+  pitch: number;
+  yaw: number;
+  positionX: number;
+  positionY: number;
+  positionZ: number;
+  latitude: number;
+  longitude: number;
+  velocityX: number;
+  velocityY: number;
+  velocityZ: number;
+  windSpeedX: number;
+  windSpeedY: number;
+  windSpeedZ: number;
+  timestamp: number;
+};
+
+export type SimulatorStateChangePayload = {
+  type: 'stateUpdate';
+  state: SimulatorState;
+};
+
+export type InitializationSettings = {
+  latitude: number;
+  longitude: number;
+  satelliteCount: number;
+};
+
+export type VirtualStickControlData = {
+  leftHorizontal: number;
+  leftVertical: number;
+  rightHorizontal: number;
+  rightVertical: number;
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
@@ -80,4 +119,5 @@ export type ExpoDjiSdkModuleEvents = {
   onSDKInitProgress: (params: { event: string; progress: number }) => void;
   onDatabaseDownloadProgress: (params: { current: number; total: number; progress: number }) => void;
   onVirtualStickStateChange: (params: VirtualStickStateChangePayload) => void;
+  onSimulatorStateChange: (params: SimulatorStateChangePayload) => void;
 };
