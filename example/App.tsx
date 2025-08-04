@@ -1,5 +1,5 @@
 import { useEvent } from 'expo';
-import ExpoDjiSdk, { testSDKClass, initializeSDK, DroneConnectionStatus } from 'expo-dji-sdk';
+import ExpoDjiSdk, { testSDKClass, initializeSDK, DroneConnectionStatus, getDetailedDroneInfo, DetailedDroneInfo } from 'expo-dji-sdk';
 import { Button, SafeAreaView, ScrollView, Text, View, Alert } from 'react-native';
 import { useState, useEffect } from 'react';
 
@@ -10,6 +10,7 @@ export default function App() {
   const [droneConnected, setDroneConnected] = useState(false);
   const [droneConnectionStatus, setDroneConnectionStatus] = useState<DroneConnectionStatus | null>(null);
   const [droneInfo, setDroneInfo] = useState<any>(null);
+  const [detailedDroneInfo, setDetailedDroneInfo] = useState<DetailedDroneInfo | null>(null);
   const [initResult, setInitResult] = useState<string>('');
   const [testResult, setTestResult] = useState<string>('');
 
@@ -93,6 +94,18 @@ export default function App() {
     }
   };
 
+  const getDetailedDroneInfoData = async () => {
+    try {
+      const info = await getDetailedDroneInfo();
+      setDetailedDroneInfo(info);
+      Alert.alert('Detailed Drone Info', 
+        `Product: ${info.productType}\nFirmware: ${info.firmwareVersion}\nSerial: ${info.serialNumber}\nProduct ID: ${info.productId}`
+      );
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to get detailed drone info');
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView style={styles.container}>
@@ -162,6 +175,25 @@ export default function App() {
                   ))}
                 </View>
               )}
+            </View>
+          ) : null}
+        </Group>
+
+        <Group name="Detailed Drone Information">
+          <Button
+            title="Get Detailed Drone Info"
+            onPress={getDetailedDroneInfoData}
+            disabled={!sdkInitialized || !droneConnected}
+          />
+          {detailedDroneInfo ? (
+            <View style={styles.infoContainer}>
+              <Text style={styles.infoText}>Product Type: {detailedDroneInfo.productType}</Text>
+              <Text style={styles.infoText}>Firmware Version: {detailedDroneInfo.firmwareVersion}</Text>
+              <Text style={styles.infoText}>Serial Number: {detailedDroneInfo.serialNumber}</Text>
+              <Text style={styles.infoText}>Product ID: {detailedDroneInfo.productId}</Text>
+              <Text style={styles.infoText}>SDK Version: {detailedDroneInfo.sdkVersion}</Text>
+              <Text style={styles.infoText}>Connected: {detailedDroneInfo.isConnected ? 'Yes' : 'No'}</Text>
+              <Text style={styles.infoText}>Registered: {detailedDroneInfo.isRegistered ? 'Yes' : 'No'}</Text>
             </View>
           ) : null}
         </Group>

@@ -57,6 +57,16 @@ export type VirtualStickStateChangePayload = {
   reason?: string;
 };
 
+export type DetailedDroneInfo = {
+  productType: string;
+  firmwareVersion: string;
+  serialNumber: string;
+  productId: number;
+  sdkVersion: string;
+  isRegistered: boolean;
+  isConnected: boolean;
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
