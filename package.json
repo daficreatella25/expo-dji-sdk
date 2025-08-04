@@ -28,7 +28,9 @@
   "author": "dafi.creatella25 <dafi.creatella25@gmail.com> (https://github.com/daficreatella25)",
   "license": "MIT",
   "homepage": "https://github.com/daficreatella25/expo-dji-sdk#readme",
-  "dependencies": {},
+  "dependencies": {
+    "@expo/config-plugins": "^8.0.0"
+  },
   "devDependencies": {
     "@types/react": "~19.0.0",
     "expo-module-scripts": "^4.1.9",
