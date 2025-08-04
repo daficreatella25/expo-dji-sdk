@@ -1,6 +1,38 @@
 # expo-dji-sdk
 
-Expo integration with DJI MSDK V5
+Expo integration with DJI MSDK V5 with automatic API key injection
+
+## 🚀 Quick Start
+
+1. Install the package:
+```bash
+npm install expo-dji-sdk
+```
+
+2. Add your DJI API key to `app.json`:
+```json
+{
+  "expo": {
+    "plugins": [
+      [
+        "expo-dji-sdk", 
+        { 
+          "apiKey": "YOUR_DJI_API_KEY_HERE" 
+        }
+      ]
+    ]
+  }
+}
+```
+
+3. Prebuild and use:
+```bash
+expo prebuild
+```
+
+✅ **No manual Android manifest or MainApplication editing required!**
+
+For detailed setup instructions, see [PLUGIN_USAGE.md](./PLUGIN_USAGE.md)
 
 # API documentation
 

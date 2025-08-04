@@ -67,6 +67,12 @@ export type DetailedDroneInfo = {
   isConnected: boolean;
 };
 
+export type ExpoDjiSdkViewProps = {
+  name: string;
+  url?: string;
+  onLoad?: (event: { nativeEvent: { url: string } }) => void;
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
