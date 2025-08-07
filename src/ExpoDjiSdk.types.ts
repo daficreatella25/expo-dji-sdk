@@ -73,6 +73,28 @@ export type ExpoDjiSdkViewProps = {
   onLoad?: (event: { nativeEvent: { url: string } }) => void;
 };
 
+export type CameraStreamInfo = {
+  width: number;
+  height: number;
+  frameRate: number;
+};
+
+export type CameraStreamStatus = {
+  isAvailable: boolean;
+  isEnabled: boolean;
+  error?: string;
+  streamInfo?: CameraStreamInfo;
+};
+
+export type CameraIndex = {
+  value: number;
+  name: string;
+};
+
+export type AvailableCameraUpdate = {
+  availableCameras: CameraIndex[];
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
@@ -80,4 +102,6 @@ export type ExpoDjiSdkModuleEvents = {
   onSDKInitProgress: (params: { event: string; progress: number }) => void;
   onDatabaseDownloadProgress: (params: { current: number; total: number; progress: number }) => void;
   onVirtualStickStateChange: (params: VirtualStickStateChangePayload) => void;
+  onAvailableCameraUpdated: (params: AvailableCameraUpdate) => void;
+  onCameraStreamStatusChange: (params: CameraStreamStatus) => void;
 };

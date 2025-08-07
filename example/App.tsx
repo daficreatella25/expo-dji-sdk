@@ -2,10 +2,16 @@ import { useEvent } from 'expo';
 import ExpoDjiSdk, { testSDKClass, initializeSDK, DroneConnectionStatus, getDetailedDroneInfo, DetailedDroneInfo } from 'expo-dji-sdk';
 import { Button, SafeAreaView, ScrollView, Text, View, Alert } from 'react-native';
 import { useState, useEffect } from 'react';
+import { NavigationContainer } from '@react-navigation/native';
+import { createStackNavigator } from '@react-navigation/stack';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import * as ScreenOrientation from 'expo-screen-orientation';
+import CameraScreen from './CameraScreen';
 
 const APP_KEY = '6464ccd90e7ed2835d025f4d';
+const Stack = createStackNavigator();
 
-export default function App() {
+function HomeScreen({ navigation }: any) {
   const [sdkInitialized, setSdkInitialized] = useState(false);
   const [droneConnected, setDroneConnected] = useState(false);
   const [droneConnectionStatus, setDroneConnectionStatus] = useState<DroneConnectionStatus | null>(null);
@@ -16,6 +22,18 @@ export default function App() {
 
   const onDroneConnectionChange = useEvent(ExpoDjiSdk, 'onDroneConnectionChange');
   const onDroneInfoUpdate = useEvent(ExpoDjiSdk, 'onDroneInfoUpdate');
+
+  useEffect(() => {
+    // Ensure portrait orientation for home screen
+    const setPortrait = async () => {
+      try {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+      } catch (error) {
+        console.log('Failed to lock to portrait:', error);
+      }
+    };
+    setPortrait();
+  }, []);
 
   useEffect(() => {
     if (onDroneConnectionChange) {
@@ -197,6 +215,17 @@ export default function App() {
             </View>
           ) : null}
         </Group>
+
+        <Group name="Camera">
+          <Button
+            title="Open Camera (Landscape)"
+            onPress={() => navigation.navigate('Camera')}
+            disabled={!sdkInitialized}
+          />
+          <Text style={styles.status}>
+            Note: Camera will open in landscape mode
+          </Text>
+        </Group>
       </ScrollView>
     </SafeAreaView>
   );
@@ -279,3 +308,34 @@ const styles = {
     marginBottom: 3,
   },
 };
+
+export default function App() {
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <NavigationContainer>
+        <Stack.Navigator
+          initialRouteName="Home"
+          screenOptions={{
+            headerStyle: { backgroundColor: '#007AFF' },
+            headerTintColor: '#fff',
+            headerTitleStyle: { fontWeight: 'bold' },
+          }}
+        >
+          <Stack.Screen 
+            name="Home" 
+            component={HomeScreen}
+            options={{ title: 'DJI SDK Example' }}
+          />
+          <Stack.Screen 
+            name="Camera" 
+            component={CameraScreen}
+            options={{ 
+              headerShown: false,
+              orientation: 'landscape',
+            }}
+          />
+        </Stack.Navigator>
+      </NavigationContainer>
+    </GestureHandlerRootView>
+  );
+}
