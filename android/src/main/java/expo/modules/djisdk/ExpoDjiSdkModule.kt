@@ -11,6 +11,10 @@ import dji.v5.manager.aircraft.virtualstick.VirtualStickManager
 import dji.v5.manager.aircraft.virtualstick.VirtualStickStateListener
 import dji.v5.manager.aircraft.virtualstick.VirtualStickState
 import dji.sdk.keyvalue.value.flightcontroller.FlightControlAuthorityChangeReason
+import dji.v5.manager.datacenter.MediaDataCenter
+import dji.v5.manager.interfaces.ICameraStreamManager
+import dji.sdk.keyvalue.value.common.ComponentIndexType
+import android.view.Surface
 import dji.sdk.keyvalue.key.ProductKey
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.v5.et.create
@@ -30,11 +34,31 @@ class ExpoDjiSdkModule : Module() {
   private var isProductConnected = false
   private var currentVirtualStickState: VirtualStickState? = null
   private var currentProductId: Int = -1
+  
+  // Camera stream management
+  private val cameraStreamManager: ICameraStreamManager 
+    get() = MediaDataCenter.getInstance().cameraStreamManager
+  private var availableCameraListener: ICameraStreamManager.AvailableCameraUpdatedListener? = null
+  private var currentCameraSurfaces = mutableMapOf<Int, Surface>()
 
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange")
+    
+    View(CameraStreamView::class) {
+      Prop("cameraIndex") { view: CameraStreamView, cameraIndex: Int ->
+        view.setCameraIndex(cameraIndex)
+      }
+
+      Prop("streamEnabled") { view: CameraStreamView, enabled: Boolean ->
+        view.setStreamEnabled(enabled)
+      }
+
+      Prop("scaleType") { view: CameraStreamView, scaleType: Int ->
+        view.setScaleType(scaleType)
+      }
+    }
 
     AsyncFunction("testSDKClass") { promise: Promise ->
       try {
@@ -89,6 +113,7 @@ class ExpoDjiSdkModule : Module() {
             ))
             
             setupVirtualStickListener()
+            setupCameraStreamListener()
             getDroneBasicInfo()
           }
 
@@ -274,6 +299,164 @@ class ExpoDjiSdkModule : Module() {
         promise.reject("PRODUCT_INFO_ERROR", "Failed to get product info: ${e.message}", e)
       }
     }
+
+    // Camera Stream Methods
+    AsyncFunction("getAvailableCameras") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.resolve(emptyList<Map<String, Any>>())
+          return@AsyncFunction
+        }
+
+        val availableCameras = mutableListOf<Map<String, Any>>()
+        
+        // Get available camera list from camera stream manager
+        // This would typically come from a listener, but we'll check common camera indices
+        val cameraIndices = listOf<Pair<ComponentIndexType, String>>(
+          Pair(ComponentIndexType.LEFT_OR_MAIN, "Main Camera"),
+          Pair(ComponentIndexType.RIGHT, "Right Camera"), 
+          Pair(ComponentIndexType.FPV, "FPV Camera")
+        )
+
+        for ((index, name) in cameraIndices) {
+          try {
+            // Try to access camera stream info to check if available
+            val streamInfo = cameraStreamManager.getAircraftStreamFrameInfo(index)
+            if (streamInfo != null) {
+              availableCameras.add(mapOf(
+                "value" to index.ordinal,
+                "name" to name
+              ))
+            }
+          } catch (e: Exception) {
+            // Camera not available, skip
+          }
+        }
+
+        promise.resolve(availableCameras)
+      } catch (e: Exception) {
+        promise.reject("CAMERA_LIST_ERROR", "Failed to get available cameras: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("enableCameraStream") { cameraIndex: Int, promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        val componentIndex = ComponentIndexType.find(cameraIndex)
+        Log.d(TAG, "Enabling camera stream for index: $cameraIndex ($componentIndex)")
+
+        try {
+          cameraStreamManager.enableStream(componentIndex, true)
+          
+          promise.resolve(mapOf(
+            "success" to true,
+            "message" to "Camera stream enabled successfully"
+          ))
+          
+          // Send status update event
+          sendEvent("onCameraStreamStatusChange", mapOf(
+            "isAvailable" to true,
+            "isEnabled" to true,
+            "streamInfo" to getCameraStreamInfoMap(componentIndex)
+          ))
+        } catch (e: Exception) {
+          promise.resolve(mapOf(
+            "success" to false,
+            "message" to "Failed to enable camera stream: ${e.message}"
+          ))
+        }
+      } catch (e: Exception) {
+        promise.reject("CAMERA_STREAM_ERROR", "Failed to enable camera stream: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("disableCameraStream") { cameraIndex: Int, promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        val componentIndex = ComponentIndexType.find(cameraIndex)
+        Log.d(TAG, "Disabling camera stream for index: $cameraIndex ($componentIndex)")
+
+        try {
+          cameraStreamManager.enableStream(componentIndex, false)
+          
+          // Remove surface if exists
+          currentCameraSurfaces[cameraIndex]?.let { surface ->
+            cameraStreamManager.removeCameraStreamSurface(surface)
+            currentCameraSurfaces.remove(cameraIndex)
+          }
+          
+          promise.resolve(mapOf(
+            "success" to true,
+            "message" to "Camera stream disabled successfully"
+          ))
+          
+          // Send status update event
+          sendEvent("onCameraStreamStatusChange", mapOf(
+            "isAvailable" to true,
+            "isEnabled" to false
+          ))
+        } catch (e: Exception) {
+          promise.resolve(mapOf(
+            "success" to false,
+            "message" to "Failed to disable camera stream: ${e.message}"
+          ))
+        }
+      } catch (e: Exception) {
+        promise.reject("CAMERA_STREAM_ERROR", "Failed to disable camera stream: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getCameraStreamStatus") { cameraIndex: Int, promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.resolve(mapOf(
+            "isAvailable" to false,
+            "isEnabled" to false,
+            "error" to "No drone connected"
+          ))
+          return@AsyncFunction
+        }
+
+        val componentIndex = ComponentIndexType.find(cameraIndex)
+        val streamInfo = getCameraStreamInfoMap(componentIndex)
+        
+        promise.resolve(mapOf(
+          "isAvailable" to (streamInfo != null),
+          "isEnabled" to currentCameraSurfaces.containsKey(cameraIndex),
+          "streamInfo" to streamInfo
+        ))
+      } catch (e: Exception) {
+        promise.reject("CAMERA_STATUS_ERROR", "Failed to get camera stream status: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getCameraStreamInfo") { cameraIndex: Int, promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        val componentIndex = ComponentIndexType.find(cameraIndex)
+        val streamInfo = getCameraStreamInfoMap(componentIndex)
+        
+        if (streamInfo != null) {
+          promise.resolve(streamInfo)
+        } else {
+          promise.reject("NO_STREAM_INFO", "No stream info available for camera $cameraIndex", null)
+        }
+      } catch (e: Exception) {
+        promise.reject("CAMERA_INFO_ERROR", "Failed to get camera stream info: ${e.message}", e)
+      }
+    }
   }
 
   private fun setupVirtualStickListener() {
@@ -320,6 +503,67 @@ class ExpoDjiSdkModule : Module() {
         "type" to "error",
         "error" to "Failed to get drone info: ${e.message}"
       ))
+    }
+  }
+
+  private fun setupCameraStreamListener() {
+    try {
+      // Set up available camera updated listener
+      availableCameraListener = object : ICameraStreamManager.AvailableCameraUpdatedListener {
+        override fun onAvailableCameraUpdated(list: MutableList<ComponentIndexType>) {
+          val availableCameras = list.map { componentIndex ->
+            mapOf(
+              "value" to componentIndex.ordinal,
+              "name" to getComponentIndexDisplayName(componentIndex)
+            )
+          }
+          
+          sendEvent("onAvailableCameraUpdated", mapOf(
+            "availableCameras" to availableCameras
+          ))
+        }
+
+        override fun onCameraStreamEnableUpdate(cameraStreamEnableMap: MutableMap<ComponentIndexType, Boolean>) {
+          // Handle camera stream enable/disable updates
+          for ((componentIndex, isEnabled) in cameraStreamEnableMap) {
+            sendEvent("onCameraStreamStatusChange", mapOf(
+              "isAvailable" to true,
+              "isEnabled" to isEnabled,
+              "streamInfo" to getCameraStreamInfoMap(componentIndex)
+            ))
+          }
+        }
+      }
+      
+      cameraStreamManager.addAvailableCameraUpdatedListener(availableCameraListener!!)
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to setup camera stream listener: ${e.message}", e)
+    }
+  }
+
+  private fun getCameraStreamInfoMap(componentIndex: ComponentIndexType): Map<String, Any>? {
+    return try {
+      val streamInfo = cameraStreamManager.getAircraftStreamFrameInfo(componentIndex)
+      if (streamInfo != null) {
+        mapOf(
+          "width" to streamInfo.width,
+          "height" to streamInfo.height,
+          "frameRate" to streamInfo.frameRate
+        )
+      } else {
+        null
+      }
+    } catch (e: Exception) {
+      null
+    }
+  }
+
+  private fun getComponentIndexDisplayName(componentIndex: ComponentIndexType): String {
+    return when (componentIndex) {
+      ComponentIndexType.LEFT_OR_MAIN -> "Main Camera"
+      ComponentIndexType.RIGHT -> "Right Camera"
+      ComponentIndexType.FPV -> "FPV Camera"
+      else -> "Camera ${componentIndex.ordinal}"
     }
   }
 }
