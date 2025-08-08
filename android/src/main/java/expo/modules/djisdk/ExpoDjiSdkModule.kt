@@ -11,6 +11,12 @@ import dji.v5.manager.aircraft.virtualstick.VirtualStickManager
 import dji.v5.manager.aircraft.virtualstick.VirtualStickStateListener
 import dji.v5.manager.aircraft.virtualstick.VirtualStickState
 import dji.sdk.keyvalue.value.flightcontroller.FlightControlAuthorityChangeReason
+import dji.sdk.keyvalue.value.flightcontroller.VirtualStickFlightControlParam
+import dji.sdk.keyvalue.value.flightcontroller.RollPitchControlMode
+import dji.sdk.keyvalue.value.flightcontroller.YawControlMode
+import dji.sdk.keyvalue.value.flightcontroller.VerticalControlMode
+import dji.sdk.keyvalue.value.flightcontroller.FlightCoordinateSystem
+import dji.sdk.keyvalue.value.common.EmptyMsg
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
 import dji.sdk.keyvalue.value.common.ComponentIndexType
@@ -19,6 +25,7 @@ import dji.sdk.keyvalue.key.ProductKey
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.v5.et.create
 import dji.v5.et.get
+import dji.v5.et.action
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
@@ -44,7 +51,7 @@ class ExpoDjiSdkModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange")
     
     View(CameraStreamView::class) {
       Prop("cameraIndex") { view: CameraStreamView, cameraIndex: Int ->
@@ -457,6 +464,401 @@ class ExpoDjiSdkModule : Module() {
         promise.reject("CAMERA_INFO_ERROR", "Failed to get camera stream info: ${e.message}", e)
       }
     }
+
+    // Virtual Stick Control Methods
+    AsyncFunction("sendVirtualStickCommand") { leftX: Double, leftY: Double, rightX: Double, rightY: Double, promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        // Convert -1.0 to 1.0 range to stick position values (-660 to 660)
+        // Based on DJI sample: OnScreenJoystick provides values between -1 and 1
+        val leftHorizontal = (leftX * 660).toInt()  // Yaw
+        val leftVertical = (leftY * 660).toInt()    // Throttle  
+        val rightHorizontal = (rightX * 660).toInt() // Roll
+        val rightVertical = (rightY * 660).toInt()   // Pitch
+
+        Log.d(TAG, "Sending virtual stick command: LH=$leftHorizontal, LV=$leftVertical, RH=$rightHorizontal, RV=$rightVertical")
+
+        // Set stick positions using the DJI SDK method (same as DJI sample)
+        VirtualStickManager.getInstance().leftStick.horizontalPosition = leftHorizontal
+        VirtualStickManager.getInstance().leftStick.verticalPosition = leftVertical
+        VirtualStickManager.getInstance().rightStick.horizontalPosition = rightHorizontal
+        VirtualStickManager.getInstance().rightStick.verticalPosition = rightVertical
+
+        promise.resolve(mapOf("success" to true))
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to send virtual stick command: ${e.message}", e)
+        promise.reject("VIRTUAL_STICK_COMMAND_ERROR", "Failed to send virtual stick command: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("setVirtualStickModeEnabled") { enabled: Boolean, promise: Promise ->
+      try {
+        if (enabled) {
+          VirtualStickManager.getInstance().enableVirtualStick(object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+              try {
+                // Set speed level (based on DJI sample)
+                VirtualStickManager.getInstance().speedLevel = 1.0
+                
+                // Enable advanced mode for better control
+                VirtualStickManager.getInstance().setVirtualStickAdvancedModeEnabled(true)
+                
+                // Configure virtual stick parameters (based on DJI sample)
+                val param = VirtualStickFlightControlParam().apply {
+                  rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
+                  verticalControlMode = VerticalControlMode.VELOCITY
+                  yawControlMode = YawControlMode.ANGULAR_VELOCITY
+                  rollPitchControlMode = RollPitchControlMode.ANGLE
+                }
+                
+                VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param)
+                
+                Log.d(TAG, "Virtual stick enabled with advanced configuration")
+                promise.resolve(mapOf("success" to true, "enabled" to true))
+              } catch (e: Exception) {
+                Log.e(TAG, "Failed to configure virtual stick: ${e.message}", e)
+                promise.reject("VIRTUAL_STICK_CONFIG_ERROR", "Failed to configure virtual stick: ${e.message}", null)
+              }
+            }
+            
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to enable virtual stick: ${error.toString()}")
+              promise.reject("VIRTUAL_STICK_ERROR", "Failed to enable virtual stick: ${error.toString()}", null)
+            }
+          })
+        } else {
+          VirtualStickManager.getInstance().disableVirtualStick(object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+              // Disable advanced mode
+              VirtualStickManager.getInstance().setVirtualStickAdvancedModeEnabled(false)
+              Log.d(TAG, "Virtual stick disabled")
+              promise.resolve(mapOf("success" to true, "enabled" to false))
+            }
+            
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to disable virtual stick: ${error.toString()}")
+              promise.reject("VIRTUAL_STICK_ERROR", "Failed to disable virtual stick: ${error.toString()}", null)
+            }
+          })
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to set virtual stick mode: ${e.message}", e)
+        promise.reject("VIRTUAL_STICK_ERROR", "Failed to set virtual stick mode: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("setVirtualStickControlMode") { 
+      rollPitchMode: String, 
+      yawMode: String, 
+      verticalMode: String, 
+      coordinateSystem: String, 
+      promise: Promise ->
+      try {
+        val rollPitchControlMode = when(rollPitchMode.uppercase()) {
+          "VELOCITY" -> RollPitchControlMode.VELOCITY
+          "ANGLE" -> RollPitchControlMode.ANGLE
+          else -> RollPitchControlMode.VELOCITY
+        }
+
+        val yawControlMode = when(yawMode.uppercase()) {
+          "ANGLE" -> YawControlMode.ANGLE
+          "ANGULAR_VELOCITY" -> YawControlMode.ANGULAR_VELOCITY
+          else -> YawControlMode.ANGULAR_VELOCITY
+        }
+
+        val verticalControlMode = when(verticalMode.uppercase()) {
+          "VELOCITY" -> VerticalControlMode.VELOCITY
+          "POSITION" -> VerticalControlMode.POSITION
+          else -> VerticalControlMode.VELOCITY
+        }
+
+        val flightCoordinateSystem = when(coordinateSystem.uppercase()) {
+          "GROUND" -> FlightCoordinateSystem.GROUND
+          "BODY" -> FlightCoordinateSystem.BODY
+          else -> FlightCoordinateSystem.GROUND
+        }
+
+        // Configure the virtual stick parameters
+        val param = VirtualStickFlightControlParam().apply {
+          this.rollPitchControlMode = rollPitchControlMode
+          this.yawControlMode = yawControlMode
+          this.verticalControlMode = verticalControlMode
+          this.rollPitchCoordinateSystem = flightCoordinateSystem
+        }
+
+        // Store the configuration for later use
+        VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param)
+        promise.resolve(mapOf("success" to true, "configured" to true))
+
+      } catch (e: Exception) {
+        promise.reject("CONTROL_MODE_ERROR", "Failed to set virtual stick control modes: ${e.message}", e)
+      }
+    }
+
+    // Takeoff and Landing Methods
+    AsyncFunction("startTakeoff") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        FlightControllerKey.KeyStartTakeoff.create().action(
+          onSuccess = { result: EmptyMsg ->
+            sendEvent("onTakeoffResult", mapOf(
+              "success" to true,
+              "message" to "Takeoff started successfully"
+            ))
+            promise.resolve(mapOf("success" to true, "message" to "Takeoff started"))
+          },
+          onFailure = { error: IDJIError ->
+            sendEvent("onTakeoffResult", mapOf(
+              "success" to false,
+              "error" to error.toString()
+            ))
+            promise.reject("TAKEOFF_ERROR", "Failed to start takeoff: ${error.toString()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("TAKEOFF_ERROR", "Failed to start takeoff: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("startLanding") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        FlightControllerKey.KeyStartAutoLanding.create().action(
+          onSuccess = { result: EmptyMsg ->
+            sendEvent("onLandingResult", mapOf(
+              "success" to true,
+              "message" to "Landing started successfully"
+            ))
+            promise.resolve(mapOf("success" to true, "message" to "Landing started"))
+          },
+          onFailure = { error: IDJIError ->
+            sendEvent("onLandingResult", mapOf(
+              "success" to false,
+              "error" to error.toString()
+            ))
+            promise.reject("LANDING_ERROR", "Failed to start landing: ${error.toString()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("LANDING_ERROR", "Failed to start landing: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("cancelLanding") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        FlightControllerKey.KeyStopAutoLanding.create().action(
+          onSuccess = { result: EmptyMsg ->
+            promise.resolve(mapOf("success" to true, "message" to "Landing cancelled"))
+          },
+          onFailure = { error: IDJIError ->
+            promise.reject("CANCEL_LANDING_ERROR", "Failed to cancel landing: ${error.toString()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("CANCEL_LANDING_ERROR", "Failed to cancel landing: ${e.message}", e)
+      }
+    }
+
+    // Flight Status and Readiness Checks
+    AsyncFunction("getFlightStatus") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        val flightStatus = mutableMapOf<String, Any?>()
+
+        // Check connection status
+        FlightControllerKey.KeyConnection.create().get(
+          onSuccess = { isConnected ->
+            flightStatus["isConnected"] = isConnected ?: false
+            
+            // Check if motors are on
+            FlightControllerKey.KeyAreMotorsOn.create().get(
+              onSuccess = { motorsOn ->
+                flightStatus["areMotorsOn"] = motorsOn ?: false
+                
+                // Check if flying
+                FlightControllerKey.KeyIsFlying.create().get(
+                  onSuccess = { isFlying ->
+                    flightStatus["isFlying"] = isFlying ?: false
+                    
+                    // Get flight mode
+                    FlightControllerKey.KeyFlightModeString.create().get(
+                      onSuccess = { flightMode ->
+                        flightStatus["flightMode"] = flightMode ?: "UNKNOWN"
+                        promise.resolve(flightStatus)
+                      },
+                      onFailure = { error ->
+                        flightStatus["flightMode"] = "UNKNOWN"
+                        promise.resolve(flightStatus)
+                      }
+                    )
+                  },
+                  onFailure = { error ->
+                    flightStatus["isFlying"] = false
+                    flightStatus["flightMode"] = "UNKNOWN"
+                    promise.resolve(flightStatus)
+                  }
+                )
+              },
+              onFailure = { error ->
+                flightStatus["areMotorsOn"] = false
+                flightStatus["isFlying"] = false
+                flightStatus["flightMode"] = "UNKNOWN"
+                promise.resolve(flightStatus)
+              }
+            )
+          },
+          onFailure = { error ->
+            promise.reject("FLIGHT_STATUS_ERROR", "Failed to get flight status: ${error.toString()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("FLIGHT_STATUS_ERROR", "Failed to get flight status: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("isReadyForTakeoff") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.resolve(mapOf(
+            "ready" to false,
+            "reason" to "No drone connected"
+          ))
+          return@AsyncFunction
+        }
+
+        // Check multiple conditions for takeoff readiness
+        FlightControllerKey.KeyConnection.create().get(
+          onSuccess = { isConnected ->
+            if (isConnected != true) {
+              promise.resolve(mapOf("ready" to false, "reason" to "Flight controller not connected"))
+              return@get
+            }
+
+            FlightControllerKey.KeyAreMotorsOn.create().get(
+              onSuccess = { motorsOn ->
+                if (motorsOn == true) {
+                  promise.resolve(mapOf("ready" to false, "reason" to "Motors are already running"))
+                  return@get
+                }
+
+                FlightControllerKey.KeyIsFlying.create().get(
+                  onSuccess = { isFlying ->
+                    if (isFlying == true) {
+                      promise.resolve(mapOf("ready" to false, "reason" to "Aircraft is already flying"))
+                      return@get
+                    }
+
+                    // All checks passed
+                    promise.resolve(mapOf(
+                      "ready" to true,
+                      "reason" to "Ready for takeoff"
+                    ))
+                  },
+                  onFailure = { error ->
+                    promise.resolve(mapOf("ready" to false, "reason" to "Cannot determine flying status"))
+                  }
+                )
+              },
+              onFailure = { error ->
+                promise.resolve(mapOf("ready" to false, "reason" to "Cannot determine motor status"))
+              }
+            )
+          },
+          onFailure = { error ->
+            promise.resolve(mapOf("ready" to false, "reason" to "Flight controller connection check failed"))
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("READINESS_CHECK_ERROR", "Failed to check takeoff readiness: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("startCompassCalibration") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        FlightControllerKey.KeyStartCompassCalibration.create().action(
+          onSuccess = { result: EmptyMsg ->
+            promise.resolve(mapOf("success" to true, "message" to "Compass calibration started"))
+          },
+          onFailure = { error: IDJIError ->
+            promise.reject("CALIBRATION_ERROR", "Failed to start compass calibration: ${error.toString()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("CALIBRATION_ERROR", "Failed to start compass calibration: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getCompassCalibrationStatus") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        FlightControllerKey.KeyCompassCalibrationStatus.create().get(
+          onSuccess = { status ->
+            promise.resolve(mapOf(
+              "status" to (status?.name ?: "UNKNOWN"),
+              "description" to getCompassCalibrationDescription(status?.name ?: "UNKNOWN")
+            ))
+          },
+          onFailure = { error ->
+            promise.reject("CALIBRATION_STATUS_ERROR", "Failed to get compass calibration status: ${error.toString()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("CALIBRATION_STATUS_ERROR", "Failed to get compass calibration status: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getAltitude") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        FlightControllerKey.KeyAltitude.create().get(
+          onSuccess = { altitude ->
+            promise.resolve(mapOf(
+              "altitude" to (altitude ?: 0.0),
+              "unit" to "meters"
+            ))
+          },
+          onFailure = { error ->
+            promise.reject("ALTITUDE_ERROR", "Failed to get altitude: ${error.toString()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("ALTITUDE_ERROR", "Failed to get altitude: ${e.message}", e)
+      }
+    }
   }
 
   private fun setupVirtualStickListener() {
@@ -564,6 +966,17 @@ class ExpoDjiSdkModule : Module() {
       ComponentIndexType.RIGHT -> "Right Camera"
       ComponentIndexType.FPV -> "FPV Camera"
       else -> "Camera ${componentIndex.ordinal}"
+    }
+  }
+
+  private fun getCompassCalibrationDescription(status: String): String {
+    return when (status) {
+      "NONE" -> "No calibration in progress"
+      "HORIZONTAL" -> "Rotate aircraft horizontally"
+      "VERTICAL" -> "Rotate aircraft vertically"
+      "SUCCEEDED" -> "Calibration completed successfully"
+      "FAILED" -> "Calibration failed, please try again"
+      else -> "Unknown calibration status"
     }
   }
 }

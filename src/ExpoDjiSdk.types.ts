@@ -95,6 +95,59 @@ export type AvailableCameraUpdate = {
   availableCameras: CameraIndex[];
 };
 
+// Virtual Stick Control Types
+export type VirtualStickCommand = {
+  leftX: number;    // Yaw control (-1.0 to 1.0)
+  leftY: number;    // Vertical control (-1.0 to 1.0)
+  rightX: number;   // Roll control (-1.0 to 1.0)
+  rightY: number;   // Pitch control (-1.0 to 1.0)
+};
+
+export type VirtualStickControlMode = {
+  rollPitchMode: 'VELOCITY' | 'ANGLE';
+  yawMode: 'ANGLE' | 'ANGULAR_VELOCITY';
+  verticalMode: 'VELOCITY' | 'POSITION';
+  coordinateSystem: 'GROUND' | 'BODY';
+};
+
+// Flight Status Types
+export type FlightStatus = {
+  isConnected: boolean;
+  areMotorsOn: boolean;
+  isFlying: boolean;
+  flightMode: string;
+};
+
+export type ReadinessCheck = {
+  ready: boolean;
+  reason: string;
+};
+
+// Takeoff and Landing Types
+export type TakeoffResult = {
+  success: boolean;
+  message?: string;
+  error?: string;
+};
+
+export type LandingResult = {
+  success: boolean;
+  message?: string;
+  error?: string;
+};
+
+// Calibration Types
+export type CompassCalibrationStatus = {
+  status: 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN';
+  description: string;
+};
+
+// Altitude Types
+export type AltitudeInfo = {
+  altitude: number;
+  unit: string;
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
@@ -104,4 +157,7 @@ export type ExpoDjiSdkModuleEvents = {
   onVirtualStickStateChange: (params: VirtualStickStateChangePayload) => void;
   onAvailableCameraUpdated: (params: AvailableCameraUpdate) => void;
   onCameraStreamStatusChange: (params: CameraStreamStatus) => void;
+  onTakeoffResult: (params: TakeoffResult) => void;
+  onLandingResult: (params: LandingResult) => void;
+  onFlightStatusChange: (params: FlightStatus) => void;
 };
