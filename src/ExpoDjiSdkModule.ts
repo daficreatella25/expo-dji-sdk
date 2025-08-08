@@ -27,6 +27,7 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   enableVirtualStick(): Promise<{ success: boolean }>;
   disableVirtualStick(): Promise<{ success: boolean }>;
   getVirtualStickState(): Promise<VirtualStickState>;
+  getVirtualStickStatus(): Promise<{ speedLevel: number; note: string; suggestion: string }>;
   sendVirtualStickCommand(leftX: number, leftY: number, rightX: number, rightY: number): Promise<{ success: boolean }>;
   setVirtualStickModeEnabled(enabled: boolean): Promise<{ success: boolean; enabled: boolean }>;
   setVirtualStickControlMode(

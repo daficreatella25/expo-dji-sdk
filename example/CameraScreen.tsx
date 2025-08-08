@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -6,9 +6,8 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
-  PanResponder,
-  Dimensions,
 } from 'react-native';
+import Joystick, { JoystickValue } from './src/components/Joystick';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import ExpoDjiSdk, { 
@@ -20,18 +19,15 @@ import ExpoDjiSdk, {
   CameraStreamView,
   startTakeoff,
   startLanding,
-  cancelLanding,
   sendVirtualStickCommand,
   setVirtualStickModeEnabled,
   setVirtualStickControlMode,
+  getVirtualStickStatus,
   getFlightStatus,
   isReadyForTakeoff,
   getAltitude,
   FlightStatus,
   ReadinessCheck,
-  TakeoffResult,
-  LandingResult,
-  VirtualStickStateChangePayload,
   AltitudeInfo
 } from 'expo-dji-sdk';
 import { useEvent } from 'expo';
@@ -56,9 +52,11 @@ export default function CameraScreen() {
   const [readinessLevel, setReadinessLevel] = useState<'ready' | 'caution' | 'not_ready'>('not_ready');
   const [altitudeInfo, setAltitudeInfo] = useState<AltitudeInfo | null>(null);
 
-  // Joystick states
+  // Joystick states - simplified
   const [leftJoystickActive, setLeftJoystickActive] = useState(false);
   const [rightJoystickActive, setRightJoystickActive] = useState(false);
+  const [currentLeftValue, setCurrentLeftValue] = useState<JoystickValue>({ x: 0, y: 0 });
+  const [currentRightValue, setCurrentRightValue] = useState<JoystickValue>({ x: 0, y: 0 });
 
   // Listen to camera stream status changes
   const onCameraStreamStatusChange = useEvent(ExpoDjiSdk, 'onCameraStreamStatusChange');
@@ -226,12 +224,24 @@ export default function CameraScreen() {
     try {
       addDebugLog('Checking SDK initialization...');
       
-      // Check if SDK is initialized
-      const connectionStatus = await ExpoDjiSdk.isDroneConnected();
-      addDebugLog(`Connection status: ${JSON.stringify(connectionStatus)}`);
+      // Check if SDK is initialized - with safety check
+      let connectionStatus;
+      try {
+        if (typeof ExpoDjiSdk?.isDroneConnected === 'function') {
+          connectionStatus = await ExpoDjiSdk.isDroneConnected();
+          addDebugLog(`Connection status: ${JSON.stringify(connectionStatus)}`);
+        } else {
+          addDebugLog('SDK not available - ExpoDjiSdk.isDroneConnected not a function');
+          connectionStatus = { sdkRegistered: false, connected: false };
+        }
+      } catch (sdkError: any) {
+        addDebugLog(`SDK connection check failed: ${sdkError?.message || 'Unknown error'}`);
+        connectionStatus = { sdkRegistered: false, connected: false };
+      }
       
-      if (!connectionStatus.sdkRegistered) {
-        throw new Error('SDK not registered. Please initialize SDK first.');
+      if (!connectionStatus?.sdkRegistered) {
+        addDebugLog('SDK not registered. Continuing with limited functionality.');
+        // Don't throw error, just log and continue
       }
 
       if (!connectionStatus.connected) {
@@ -383,6 +393,14 @@ export default function CameraScreen() {
   const handleEnableVirtualStick = async () => {
     try {
       addDebugLog('Setting up virtual stick mode...');
+      
+      // Check if functions are available
+      if (typeof setVirtualStickControlMode !== 'function' || typeof setVirtualStickModeEnabled !== 'function') {
+        addDebugLog('Virtual stick functions not available');
+        Alert.alert('Error', 'Virtual stick functions not available. SDK may not be initialized.');
+        return;
+      }
+      
       // First set control modes
       await setVirtualStickControlMode('VELOCITY', 'ANGULAR_VELOCITY', 'VELOCITY', 'GROUND');
       
@@ -390,8 +408,8 @@ export default function CameraScreen() {
       await setVirtualStickModeEnabled(true);
       addDebugLog('Virtual stick enabled successfully');
     } catch (error: any) {
-      addDebugLog(`Virtual stick error: ${error.message}`);
-      Alert.alert('Virtual Stick Error', error.message);
+      addDebugLog(`Virtual stick error: ${error?.message || 'Unknown error'}`);
+      Alert.alert('Virtual Stick Error', error?.message || 'Unknown error');
     }
   };
 
@@ -408,16 +426,72 @@ export default function CameraScreen() {
 
   const handleVirtualStickCommand = async (leftX: number, leftY: number, rightX: number, rightY: number) => {
     if (!virtualStickEnabled) {
-      addDebugLog(`Virtual stick disabled - ignoring command`);
-      return;
+      return; // Don't log when disabled to reduce noise
     }
     
     try {
-      addDebugLog(`Sending virtual stick command: LX=${leftX.toFixed(2)}, LY=${leftY.toFixed(2)}, RX=${rightX.toFixed(2)}, RY=${rightY.toFixed(2)}`);
+      // Check if sendVirtualStickCommand is available before calling
+      if (typeof sendVirtualStickCommand !== 'function') {
+        addDebugLog(`sendVirtualStickCommand is not available`);
+        return;
+      }
+      
       await sendVirtualStickCommand(leftX, leftY, rightX, rightY);
-      addDebugLog(`Virtual stick command sent successfully`);
     } catch (error: any) {
-      addDebugLog(`Virtual stick command error: ${error.message}`);
+      addDebugLog(`Virtual stick command error: ${error?.message || 'Unknown error'}`);
+    }
+  };
+
+  // Joystick event handlers
+  const handleLeftJoystickChange = (value: JoystickValue) => {
+    setCurrentLeftValue(value);
+    // Left stick: X = Yaw, Y = Throttle
+    handleVirtualStickCommand(value.x, value.y, currentRightValue.x, currentRightValue.y);
+  };
+
+  const handleRightJoystickChange = (value: JoystickValue) => {
+    setCurrentRightValue(value);
+    // Right stick: X = Roll, Y = Pitch
+    handleVirtualStickCommand(currentLeftValue.x, currentLeftValue.y, value.x, value.y);
+  };
+
+  const handleLeftJoystickStart = () => {
+    setLeftJoystickActive(true);
+    addDebugLog('Left joystick activated');
+  };
+
+  const handleLeftJoystickEnd = () => {
+    setLeftJoystickActive(false);
+    addDebugLog('Left joystick released');
+  };
+
+  const handleRightJoystickStart = () => {
+    setRightJoystickActive(true);
+    addDebugLog('Right joystick activated');
+  };
+
+  const handleRightJoystickEnd = () => {
+    setRightJoystickActive(false);
+    addDebugLog('Right joystick released');
+  };
+
+  const checkVirtualStickRequirements = async () => {
+    try {
+      if (typeof getVirtualStickStatus === 'function') {
+        const status = await getVirtualStickStatus();
+        addDebugLog(`Virtual stick status checked: Speed=${status.speedLevel}`);
+        Alert.alert(
+          'Virtual Stick Requirements', 
+          `Current Speed Level: ${status.speedLevel}\n\n${status.note}\n\nSteps:\n${status.suggestion}`,
+          [{ text: 'OK', style: 'default' }]
+        );
+      } else {
+        addDebugLog('getVirtualStickStatus not available');
+        Alert.alert('Error', 'Virtual stick status function not available');
+      }
+    } catch (error: any) {
+      addDebugLog(`Status check error: ${error?.message || 'Unknown error'}`);
+      Alert.alert('Status Error', error?.message || 'Unknown error');
     }
   };
 
@@ -464,84 +538,6 @@ export default function CameraScreen() {
     }
   };
 
-  // Create joystick component
-  const createJoystick = (isLeft: boolean) => {
-    const joystickRadius = 60;
-    const knobRadius = 25;
-    
-    const panResponder = PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      
-      onPanResponderGrant: () => {
-        if (isLeft) {
-          setLeftJoystickActive(true);
-          addDebugLog(`Left joystick activated`);
-        } else {
-          setRightJoystickActive(true);
-          addDebugLog(`Right joystick activated`);
-        }
-      },
-      
-      onPanResponderMove: (evt, gestureState) => {
-        const { dx, dy } = gestureState;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        const maxDistance = joystickRadius - knobRadius;
-        
-        // Limit the knob to the joystick area
-        let limitedX = dx;
-        let limitedY = dy;
-        
-        if (distance > maxDistance) {
-          limitedX = (dx / distance) * maxDistance;
-          limitedY = (dy / distance) * maxDistance;
-        }
-        
-        // Convert to -1 to 1 range
-        const normalizedX = limitedX / maxDistance;
-        const normalizedY = -limitedY / maxDistance; // Invert Y axis
-        
-        // Send virtual stick command
-        if (isLeft) {
-          // Left stick: X = Yaw, Y = Throttle
-          handleVirtualStickCommand(normalizedX, normalizedY, 0, 0);
-        } else {
-          // Right stick: X = Roll, Y = Pitch  
-          handleVirtualStickCommand(0, 0, normalizedX, normalizedY);
-        }
-      },
-      
-      onPanResponderRelease: () => {
-        // Return to center and stop movement
-        if (isLeft) {
-          setLeftJoystickActive(false);
-          handleVirtualStickCommand(0, 0, 0, 0); // Stop all movement
-          addDebugLog(`Left joystick released`);
-        } else {
-          setRightJoystickActive(false);
-          handleVirtualStickCommand(0, 0, 0, 0); // Stop all movement
-          addDebugLog(`Right joystick released`);
-        }
-      },
-    });
-    
-    return (
-      <View style={styles.joystickContainer}>
-        <Text style={styles.joystickLabel}>
-          {isLeft ? 'Throttle / Yaw' : 'Roll / Pitch'}
-        </Text>
-        <View 
-          style={[
-            styles.joystickArea,
-            (isLeft ? leftJoystickActive : rightJoystickActive) && styles.joystickActive
-          ]}
-          {...panResponder.panHandlers}
-        >
-          <View style={styles.joystickKnob} />
-        </View>
-      </View>
-    );
-  };
 
   if (isLoading) {
     return (
@@ -585,7 +581,7 @@ export default function CameraScreen() {
           scaleType={0} // CENTER_INSIDE
         />
         
-        {/* Top-Left Flight Controls */}
+        {/* Top-Left Flight Controls - Moved higher to avoid navigation bar */}
         <View style={styles.topLeftControls}>
           {/* Readiness Status */}
           {!isFlying && readinessStatus && (
@@ -598,7 +594,7 @@ export default function CameraScreen() {
                 {readinessLevel === 'ready' ? '✅ READY' : 
                  readinessLevel === 'caution' ? '⚠️ CAUTION' : '❌ NOT READY'}
               </Text>
-              <Text style={styles.readinessReason}>{readinessStatus.reason}</Text>
+              <Text style={styles.readinessReason}>{readinessStatus?.reason || 'Checking status...'}</Text>
             </View>
           )}
           
@@ -627,17 +623,27 @@ export default function CameraScreen() {
             
             {/* Virtual Stick Toggle */}
             {isFlying && (
-              <TouchableOpacity 
-                style={[
-                  styles.virtualStickToggle, 
-                  virtualStickEnabled ? styles.virtualStickActive : styles.virtualStickInactive
-                ]} 
-                onPress={virtualStickEnabled ? handleDisableVirtualStick : handleEnableVirtualStick}
-              >
-                <Text style={styles.virtualStickToggleText}>
-                  {virtualStickEnabled ? '🕹️ VSTICK ON' : '🕹️ VSTICK OFF'}
-                </Text>
-              </TouchableOpacity>
+              <View style={styles.virtualStickContainer}>
+                <TouchableOpacity 
+                  style={[
+                    styles.virtualStickToggle, 
+                    virtualStickEnabled ? styles.virtualStickActive : styles.virtualStickInactive
+                  ]} 
+                  onPress={virtualStickEnabled ? handleDisableVirtualStick : handleEnableVirtualStick}
+                >
+                  <Text style={styles.virtualStickToggleText}>
+                    {virtualStickEnabled ? '🕹️ VSTICK ON' : '🕹️ VSTICK OFF'}
+                  </Text>
+                </TouchableOpacity>
+                
+                {/* Help Button for Virtual Stick Requirements */}
+                <TouchableOpacity 
+                  style={styles.virtualStickHelpButton}
+                  onPress={checkVirtualStickRequirements}
+                >
+                  <Text style={styles.virtualStickHelpText}>❓</Text>
+                </TouchableOpacity>
+              </View>
             )}
           </View>
         </View>
@@ -656,7 +662,7 @@ export default function CameraScreen() {
           
           {streamInfo && (
             <Text style={styles.infoBadge}>
-              {streamInfo.width}×{streamInfo.height} @ {streamInfo.frameRate}fps
+              {streamInfo?.width || 0}×{streamInfo?.height || 0} @ {streamInfo?.frameRate || 0}fps
             </Text>
           )}
 
@@ -667,12 +673,12 @@ export default function CameraScreen() {
                 {isFlying ? '✈️ FLYING' : '🛬 GROUND'}
               </Text>
               <Text style={styles.infoBadge}>
-                MODE: {flightStatus.flightMode}
+                MODE: {flightStatus?.flightMode || 'UNKNOWN'}
               </Text>
               {/* Altitude Display when Flying */}
               {isFlying && altitudeInfo && (
                 <Text style={[styles.altitudeBadge]}>
-                  📏 {altitudeInfo.altitude.toFixed(1)}m
+                  📏 {altitudeInfo?.altitude?.toFixed(1) || '0.0'}m
                 </Text>
               )}
             </>
@@ -683,7 +689,7 @@ export default function CameraScreen() {
         {isFlying && altitudeInfo && (
           <View style={styles.centerElevationDisplay}>
             <Text style={styles.centerElevationText}>
-              {altitudeInfo.altitude.toFixed(1)} m
+              {altitudeInfo?.altitude?.toFixed(1) || '0.0'} m
             </Text>
             <Text style={styles.centerElevationLabel}>ALTITUDE</Text>
           </View>
@@ -693,8 +699,20 @@ export default function CameraScreen() {
         {virtualStickEnabled && (
           <View style={styles.virtualStickControlsOverlay}>
             <View style={styles.joystickLayout}>
-              {createJoystick(true)}  {/* Left joystick */}
-              {createJoystick(false)} {/* Right joystick */}
+              <Joystick
+                label="Throttle / Yaw"
+                onValueChange={handleLeftJoystickChange}
+                onStart={handleLeftJoystickStart}
+                onEnd={handleLeftJoystickEnd}
+                isActive={leftJoystickActive}
+              />
+              <Joystick
+                label="Roll / Pitch"
+                onValueChange={handleRightJoystickChange}
+                onStart={handleRightJoystickStart}
+                onEnd={handleRightJoystickEnd}
+                isActive={rightJoystickActive}
+              />
             </View>
           </View>
         )}
@@ -751,6 +769,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
+    paddingLeft: 70
   },
   cameraContainer: {
     flex: 1,
@@ -772,7 +791,7 @@ const styles = StyleSheet.create({
   },
   controls: {
     position: 'absolute',
-    bottom: 100, // Move much higher to avoid Android navigation bar
+    bottom: 20, // Move much higher to avoid Android navigation bar
     left: 20,
     right: 20,
     flexDirection: 'row',
@@ -824,7 +843,7 @@ const styles = StyleSheet.create({
     top: 60,
     left: 10,
     right: 10,
-    bottom: 120,
+    bottom: 20,
     backgroundColor: 'rgba(0,0,0,0.9)',
     padding: 10,
     borderRadius: 5,
@@ -929,11 +948,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   
-  // Top-Left Flight Controls
+  // Top-Left Flight Controls - Moved to mid-left to avoid navigation bar
   topLeftControls: {
     position: 'absolute',
-    top: 15,
-    left: 15,
+    top: 20, // Much further down to avoid issues
+    left: 60,
     zIndex: 10,
   },
   readinessContainer: {
@@ -987,11 +1006,17 @@ const styles = StyleSheet.create({
   disabledButton: {
     backgroundColor: 'rgba(100, 100, 100, 0.6)',
   },
+  virtualStickContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   virtualStickToggle: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 8,
     alignItems: 'center',
+    flex: 1,
   },
   virtualStickActive: {
     backgroundColor: 'rgba(0, 255, 100, 0.9)',
@@ -1004,59 +1029,37 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
   },
+  virtualStickHelpButton: {
+    width: 40,
+    height: 40,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.4)',
+  },
+  virtualStickHelpText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
 
   // Virtual Stick Controls - Remote Controller Style
   virtualStickControlsOverlay: {
     position: 'absolute',
-    bottom: 160, // Move much higher to avoid navigation bar interference
+    bottom: 50, // Move much higher to avoid navigation bar interference
     left: 0,
     right: 0,
     backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    paddingVertical: 20,
-    paddingHorizontal: 30,
+    paddingVertical: 100,
+    paddingHorizontal: 80,
   },
   joystickLayout: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 40,
-  },
-  joystickContainer: {
-    alignItems: 'center',
-  },
-  joystickLabel: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  joystickArea: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderWidth: 3,
-    borderColor: 'rgba(255, 255, 255, 0.3)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  joystickActive: {
-    backgroundColor: 'rgba(0, 255, 100, 0.2)',
-    borderColor: 'rgba(0, 255, 100, 0.6)',
-  },
-  joystickKnob: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: 'rgba(255, 255, 255, 0.8)',
-    borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
   },
   statusRefreshButton: {
     backgroundColor: '#4CAF50',

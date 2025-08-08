@@ -7,6 +7,7 @@ import { createStackNavigator } from '@react-navigation/stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import CameraScreen from './CameraScreen';
+import JoystickTest from './src/screens/JoystickTest';
 
 const APP_KEY = '6464ccd90e7ed2835d025f4d';
 const Stack = createStackNavigator();
@@ -226,6 +227,16 @@ function HomeScreen({ navigation }: any) {
             Note: Camera will open in landscape mode
           </Text>
         </Group>
+
+        <Group name="Testing">
+          <Button
+            title="🕹️ Test Joysticks"
+            onPress={() => navigation.navigate('JoystickTest')}
+          />
+          <Text style={styles.status}>
+            Test joystick controls independently
+          </Text>
+        </Group>
       </ScrollView>
     </SafeAreaView>
   );
@@ -332,6 +343,15 @@ export default function App() {
             options={{ 
               headerShown: false,
               orientation: 'landscape',
+            }}
+          />
+          <Stack.Screen 
+            name="JoystickTest" 
+            component={JoystickTest}
+            options={{ 
+              title: '🕹️ Joystick Test',
+              headerStyle: { backgroundColor: '#000' },
+              headerTintColor: '#fff',
             }}
           />
         </Stack.Navigator>

@@ -473,20 +473,64 @@ class ExpoDjiSdkModule : Module() {
           return@AsyncFunction
         }
 
-        // Convert -1.0 to 1.0 range to stick position values (-660 to 660)
+        // Convert -1.0 to 1.0 range to stick position values
         // Based on DJI sample: OnScreenJoystick provides values between -1 and 1
-        val leftHorizontal = (leftX * 660).toInt()  // Yaw
-        val leftVertical = (leftY * 660).toInt()    // Throttle  
-        val rightHorizontal = (rightX * 660).toInt() // Roll
-        val rightVertical = (rightY * 660).toInt()   // Pitch
+        // Apply deviation threshold (DJI sample uses 0.02 threshold)
+        val deviation = 0.02
+        
+        var adjustedLeftX = if (kotlin.math.abs(leftX) >= deviation) leftX else 0.0
+        var adjustedLeftY = if (kotlin.math.abs(leftY) >= deviation) leftY else 0.0
+        var adjustedRightX = if (kotlin.math.abs(rightX) >= deviation) rightX else 0.0
+        var adjustedRightY = if (kotlin.math.abs(rightY) >= deviation) rightY else 0.0
+        
+        // Use DJI SDK's MAX_STICK_POSITION_ABS constant (typically 660)
+        val maxStickPosition = 660 // Stick.MAX_STICK_POSITION_ABS equivalent
+        
+        val leftHorizontal = (adjustedLeftX * maxStickPosition).toInt()  // Yaw
+        val leftVertical = (adjustedLeftY * maxStickPosition).toInt()    // Throttle  
+        val rightHorizontal = (adjustedRightX * maxStickPosition).toInt() // Roll
+        val rightVertical = (adjustedRightY * maxStickPosition).toInt()   // Pitch
 
         Log.d(TAG, "Sending virtual stick command: LH=$leftHorizontal, LV=$leftVertical, RH=$rightHorizontal, RV=$rightVertical")
+        
+        // Check virtual stick state before sending commands (simplified check)
+        try {
+          // Basic validation - if VirtualStickManager throws exception, virtual stick is not ready
+          val manager = VirtualStickManager.getInstance()
+          Log.d(TAG, "Virtual Stick Manager accessed successfully, sending stick positions")
+        } catch (e: Exception) {
+          Log.w(TAG, "Virtual stick manager not available: ${e.message}")
+          promise.reject("VIRTUAL_STICK_NOT_READY", "Virtual stick not ready: ${e.message}", null)
+          return@AsyncFunction
+        }
 
         // Set stick positions using the DJI SDK method (same as DJI sample)
         VirtualStickManager.getInstance().leftStick.horizontalPosition = leftHorizontal
         VirtualStickManager.getInstance().leftStick.verticalPosition = leftVertical
         VirtualStickManager.getInstance().rightStick.horizontalPosition = rightHorizontal
         VirtualStickManager.getInstance().rightStick.verticalPosition = rightVertical
+        
+        // ALSO send advanced parameters with current stick values (this might be the missing piece)
+        try {
+          val param = VirtualStickFlightControlParam().apply {
+            // Use the normalized values for advanced parameters (Double type required)
+            roll = adjustedRightX    // Right stick X
+            pitch = adjustedRightY   // Right stick Y  
+            yaw = adjustedLeftX      // Left stick X
+            verticalThrottle = adjustedLeftY // Left stick Y (correct property name)
+            
+            // Same configuration as during enable
+            rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
+            verticalControlMode = VerticalControlMode.VELOCITY
+            yawControlMode = YawControlMode.ANGULAR_VELOCITY
+            rollPitchControlMode = RollPitchControlMode.ANGLE
+          }
+          
+          VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param)
+          Log.d(TAG, "Advanced param sent: roll=${param.roll}, pitch=${param.pitch}, yaw=${param.yaw}, verticalThrottle=${param.verticalThrottle}")
+        } catch (e: Exception) {
+          Log.w(TAG, "Failed to send advanced param: ${e.message}")
+        }
 
         promise.resolve(mapOf("success" to true))
       } catch (e: Exception) {
@@ -548,6 +592,24 @@ class ExpoDjiSdkModule : Module() {
       } catch (e: Exception) {
         Log.e(TAG, "Failed to set virtual stick mode: ${e.message}", e)
         promise.reject("VIRTUAL_STICK_ERROR", "Failed to set virtual stick mode: ${e.message}", e)
+      }
+    }
+
+    // Add method to check virtual stick status
+    AsyncFunction("getVirtualStickStatus") { promise: Promise ->
+      try {
+        val manager = VirtualStickManager.getInstance()
+        
+        // Try to get current virtual stick information
+        val result = mapOf(
+          "speedLevel" to manager.speedLevel,
+          "note" to "For virtual stick to work, drone usually needs to be flying or motors started. Check logs for detailed state info.",
+          "suggestion" to "1. Enable takeoff, 2. Start motors or takeoff, 3. Then try virtual stick"
+        )
+        
+        promise.resolve(result)
+      } catch (e: Exception) {
+        promise.reject("VIRTUAL_STICK_STATUS_ERROR", "Failed to get virtual stick status: ${e.message}", e)
       }
     }
 

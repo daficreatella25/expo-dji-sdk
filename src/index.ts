@@ -18,6 +18,7 @@ export const getDetailedDroneInfo = () => ExpoDjiSdkModule.getDetailedDroneInfo(
 export const enableVirtualStick = () => ExpoDjiSdkModule.enableVirtualStick();
 export const disableVirtualStick = () => ExpoDjiSdkModule.disableVirtualStick();
 export const getVirtualStickState = () => ExpoDjiSdkModule.getVirtualStickState();
+export const getVirtualStickStatus = () => ExpoDjiSdkModule.getVirtualStickStatus();
 export const sendVirtualStickCommand = (leftX: number, leftY: number, rightX: number, rightY: number) => 
   ExpoDjiSdkModule.sendVirtualStickCommand(leftX, leftY, rightX, rightY);
 export const setVirtualStickModeEnabled = (enabled: boolean) => ExpoDjiSdkModule.setVirtualStickModeEnabled(enabled);
