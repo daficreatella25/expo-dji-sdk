@@ -13,7 +13,18 @@ import {
   FlightStatus,
   ReadinessCheck,
   CompassCalibrationStatus,
-  AltitudeInfo
+  AltitudeInfo,
+  GPSLocation,
+  FlyToMissionInfo,
+  FlyToResult,
+  WaypointMissionSupport,
+  WaypointMissionState,
+  WaypointMissionLoadResult,
+  WaypointMissionResult,
+  KMLMissionConfig,
+  KMLMissionPreview,
+  KMLMissionResult,
+  KMLMissionStatus
 } from './ExpoDjiSdk.types';
 
 declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
@@ -41,6 +52,8 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   startTakeoff(): Promise<{ success: boolean; message: string }>;
   startLanding(): Promise<{ success: boolean; message: string }>;
   cancelLanding(): Promise<{ success: boolean; message: string }>;
+  confirmLanding(): Promise<{ success: boolean; message: string }>;
+  isLandingConfirmationNeeded(): Promise<{ isNeeded: boolean; success: boolean; error?: string }>;
   
   // Flight Status and Readiness
   getFlightStatus(): Promise<FlightStatus>;
@@ -50,8 +63,29 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   startCompassCalibration(): Promise<{ success: boolean; message: string }>;
   getCompassCalibrationStatus(): Promise<CompassCalibrationStatus>;
   
-  // Altitude
+  // Altitude and GPS
   getAltitude(): Promise<AltitudeInfo>;
+  getGPSLocation(): Promise<GPSLocation>;
+  
+  // Intelligent Flight - FlyTo Mission
+  startFlyToMission(latitude: number, longitude: number, altitude: number, maxSpeed: number): Promise<FlyToResult>;
+  stopFlyToMission(): Promise<FlyToResult>;
+  getFlyToMissionInfo(): Promise<FlyToMissionInfo>;
+  
+  // Waypoint Mission
+  isWaypointMissionSupported(): Promise<WaypointMissionSupport>;
+  getWaypointMissionState(): Promise<WaypointMissionState>;
+  loadWaypointMissionFromKML(filePath: string): Promise<WaypointMissionLoadResult>;
+  generateTestWaypointMission(latitude?: number, longitude?: number): Promise<WaypointMissionLoadResult>;
+  getControllerInfo(): Promise<any>;
+  convertKMLToKMZ(kmlPath: string, heightMode: string): Promise<any>;
+  validateKMZFile(kmzPath: string): Promise<any>;
+  uploadKMZToAircraft(kmzPath: string): Promise<any>;
+  getAvailableWaylines(kmzPath: string): Promise<any>;
+  startWaypointMission(missionFileName?: string): Promise<WaypointMissionResult>;
+  stopWaypointMission(missionFileName?: string): Promise<WaypointMissionResult>;
+  pauseWaypointMission(): Promise<WaypointMissionResult>;
+  resumeWaypointMission(): Promise<WaypointMissionResult>;
   
   // Camera Stream
   getAvailableCameras(): Promise<CameraIndex[]>;
@@ -59,6 +93,16 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   disableCameraStream(cameraIndex: number): Promise<{ success: boolean; message?: string }>;
   getCameraStreamStatus(cameraIndex: number): Promise<CameraStreamStatus>;
   getCameraStreamInfo(cameraIndex: number): Promise<CameraStreamInfo>;
+  
+  // KML Mission
+  importKMLMission(kmlFilePath: string, options?: KMLMissionConfig): Promise<KMLMissionResult>;
+  previewKMLMission(kmlFilePath: string): Promise<KMLMissionPreview>;
+  importKMLMissionFromContent(kmlContent: string, options?: KMLMissionConfig): Promise<KMLMissionResult>;
+  previewKMLMissionFromContent(kmlContent: string): Promise<KMLMissionPreview>;
+  pauseKMLMission(): Promise<{ success: boolean; message: string }>;
+  resumeKMLMission(): Promise<{ success: boolean; message: string }>;
+  stopKMLMission(): Promise<{ success: boolean; message: string }>;
+  getKMLMissionStatus(): Promise<KMLMissionStatus>;
 }
 
 // This call loads the native module object from the JSI.

@@ -148,6 +148,130 @@ export type AltitudeInfo = {
   unit: string;
 };
 
+// GPS Location Types (LocationCoordinate3D)
+export type GPSLocation = {
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  isValid: boolean;
+  error?: string;
+};
+
+// Intelligent Flight - FlyTo Mission Types
+export type FlyToTarget = {
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  maxSpeed?: number;
+};
+
+export type FlyToMissionInfo = {
+  isRunning: boolean;
+  currentSpeed: number;
+  targetLocation?: {
+    latitude: number;
+    longitude: number;
+    altitude: number;
+  };
+  distanceToTarget: number;
+};
+
+export type FlyToResult = {
+  success: boolean;
+  message?: string;
+  error?: string;
+};
+
+// Waypoint Mission Types
+export type WaypointMissionSupport = {
+  isSupported: boolean;
+  success: boolean;
+  error?: string;
+};
+
+export type WaypointMissionState = {
+  state: string;
+  success: boolean;
+  error?: string;
+};
+
+export type WaypointMissionLoadResult = {
+  success: boolean;
+  message?: string;
+  waypointCount?: number;
+  filePath?: string;
+  error?: string;
+};
+
+export type WaypointMissionResult = {
+  success: boolean;
+  message?: string;
+  error?: string;
+};
+
+// WPMZ Upload Progress Types
+export type WaypointMissionUploadProgress = {
+  progress: number;
+  percentage: number;
+  status: string;
+};
+
+// KML Mission Types
+export type KMLMissionConfig = {
+  speed?: number;
+  maxSpeed?: number;
+  enableTakePhoto?: boolean;
+  enableStartRecording?: boolean;
+};
+
+export type KMLMissionStats = {
+  totalDistance: number;
+  minAltitude: number;
+  maxAltitude: number;
+  altitudeRange: number;
+};
+
+export type KMLMissionProgress = {
+  currentWaypoint: number;
+  totalWaypoints: number;
+  progress: number; // 0.0 to 1.0
+  distanceToTarget?: number;
+};
+
+export type KMLMissionPreview = {
+  name: string;
+  originalWaypoints: number;
+  optimizedWaypoints: number;
+  totalDistance: number;
+  minAltitude: number;
+  maxAltitude: number;
+  altitudeRange: number;
+  isValid: boolean;
+  issues: string[];
+  supportsNativeWaypoints: boolean;
+};
+
+export type KMLMissionResult = {
+  success: boolean;
+  missionType?: 'native' | 'virtualStick';
+  waypoints?: number;
+  message?: string;
+  error?: string;
+};
+
+export type KMLMissionStatus = {
+  isRunning: boolean;
+  isPaused: boolean;
+  missionType: 'none' | 'native' | 'virtual_stick';
+};
+
+export type KMLMissionEvent = {
+  type: 'missionPrepared' | 'missionStarted' | 'missionProgress' | 'missionCompleted' | 'missionFailed' | 'missionPaused' | 'missionResumed';
+  data?: KMLMissionStats | KMLMissionProgress;
+  missionType?: string;
+  error?: string;
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
@@ -160,4 +284,6 @@ export type ExpoDjiSdkModuleEvents = {
   onTakeoffResult: (params: TakeoffResult) => void;
   onLandingResult: (params: LandingResult) => void;
   onFlightStatusChange: (params: FlightStatus) => void;
+  onWaypointMissionUploadProgress: (params: WaypointMissionUploadProgress) => void;
+  onKMLMissionEvent: (params: KMLMissionEvent) => void;
 };

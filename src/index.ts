@@ -29,6 +29,8 @@ export const setVirtualStickControlMode = (rollPitchMode: string, yawMode: strin
 export const startTakeoff = () => ExpoDjiSdkModule.startTakeoff();
 export const startLanding = () => ExpoDjiSdkModule.startLanding();
 export const cancelLanding = () => ExpoDjiSdkModule.cancelLanding();
+export const confirmLanding = () => ExpoDjiSdkModule.confirmLanding();
+export const isLandingConfirmationNeeded = () => ExpoDjiSdkModule.isLandingConfirmationNeeded();
 
 // Flight Status and Readiness
 export const getFlightStatus = () => ExpoDjiSdkModule.getFlightStatus();
@@ -38,8 +40,30 @@ export const isReadyForTakeoff = () => ExpoDjiSdkModule.isReadyForTakeoff();
 export const startCompassCalibration = () => ExpoDjiSdkModule.startCompassCalibration();
 export const getCompassCalibrationStatus = () => ExpoDjiSdkModule.getCompassCalibrationStatus();
 
-// Altitude
+// Altitude and GPS
 export const getAltitude = () => ExpoDjiSdkModule.getAltitude();
+export const getGPSLocation = () => ExpoDjiSdkModule.getGPSLocation();
+
+// Intelligent Flight - FlyTo Mission
+export const startFlyToMission = (latitude: number, longitude: number, altitude: number, maxSpeed: number) => 
+  ExpoDjiSdkModule.startFlyToMission(latitude, longitude, altitude, maxSpeed);
+export const stopFlyToMission = () => ExpoDjiSdkModule.stopFlyToMission();
+export const getFlyToMissionInfo = () => ExpoDjiSdkModule.getFlyToMissionInfo();
+
+// Waypoint Mission
+export const isWaypointMissionSupported = () => ExpoDjiSdkModule.isWaypointMissionSupported();
+export const getWaypointMissionState = () => ExpoDjiSdkModule.getWaypointMissionState();
+export const loadWaypointMissionFromKML = (filePath: string) => ExpoDjiSdkModule.loadWaypointMissionFromKML(filePath);
+export const generateTestWaypointMission = (latitude?: number, longitude?: number) => ExpoDjiSdkModule.generateTestWaypointMission(latitude, longitude);
+export const getControllerInfo = () => ExpoDjiSdkModule.getControllerInfo();
+export const convertKMLToKMZ = (kmlPath: string, heightMode: string) => ExpoDjiSdkModule.convertKMLToKMZ(kmlPath, heightMode);
+export const validateKMZFile = (kmzPath: string) => ExpoDjiSdkModule.validateKMZFile(kmzPath);
+export const uploadKMZToAircraft = (kmzPath: string) => ExpoDjiSdkModule.uploadKMZToAircraft(kmzPath);
+export const getAvailableWaylines = (kmzPath: string) => ExpoDjiSdkModule.getAvailableWaylines(kmzPath);
+export const startWaypointMission = (missionFileName?: string) => ExpoDjiSdkModule.startWaypointMission(missionFileName);
+export const stopWaypointMission = (missionFileName?: string) => ExpoDjiSdkModule.stopWaypointMission(missionFileName);
+export const pauseWaypointMission = () => ExpoDjiSdkModule.pauseWaypointMission();
+export const resumeWaypointMission = () => ExpoDjiSdkModule.resumeWaypointMission();
 
 // Camera Stream
 export const getAvailableCameras = () => ExpoDjiSdkModule.getAvailableCameras();

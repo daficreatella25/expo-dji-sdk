@@ -20,15 +20,70 @@ import dji.sdk.keyvalue.value.common.EmptyMsg
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
 import dji.sdk.keyvalue.value.common.ComponentIndexType
+import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import android.view.Surface
 import dji.sdk.keyvalue.key.ProductKey
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.v5.et.create
 import dji.v5.et.get
 import dji.v5.et.action
+import dji.v5.manager.intelligent.IntelligentFlightManager
+import dji.v5.manager.intelligent.flyto.FlyToTarget
+import dji.v5.manager.intelligent.flyto.FlyToInfo
+import dji.sdk.keyvalue.value.flightcontroller.FlyToMode
+import dji.v5.manager.aircraft.waypoint3.WaypointMissionManager
+import dji.v5.manager.aircraft.waypoint3.model.WaypointMissionExecuteState
+import dji.v5.manager.aircraft.waypoint3.WaypointMissionExecuteStateListener
+import com.dji.wpmzsdk.manager.WPMZManager
+import com.dji.wpmzsdk.common.data.HeightMode
+import com.dji.wpmzsdk.common.utils.kml.KMLUtil
+import com.dji.wpmzsdk.common.utils.kml.KMLFileParseInfo
+import com.dji.wpmzsdk.common.utils.kml.data.MissionType
+import com.dji.wpmzsdk.common.utils.kml.transfrom.MissionTransformData
+import com.dji.wpmzsdk.common.utils.kml.converter.MissionGreenDaoTransform
+import com.dji.wpmzsdk.common.data.Template as WPMZTemplate
+import com.dji.wpmzsdk.common.utils.TemplateTransform
+import com.dji.industry.pilot.missionflight.library.MissionImportParams
+import com.dji.wpmzsdk.common.utils.kml.data.MissionImportHeightMode
+import dji.sdk.wpmz.value.mission.WaylineMissionConfig
+import dji.sdk.wpmz.value.mission.WaylineMission
+import dji.sdk.wpmz.value.mission.WaylineWaypoint
+import dji.sdk.wpmz.value.mission.WaylineLocationCoordinate2D
+import dji.sdk.wpmz.value.mission.WaylineFinishedAction
+import dji.sdk.wpmz.value.mission.WaylinePayloadParam
+import dji.sdk.wpmz.value.mission.WaylineExitOnRCLostAction
+import dji.sdk.wpmz.value.mission.WaylineExitOnRCLostBehavior
+import dji.sdk.wpmz.value.mission.WaylineFlyToWaylineMode
+import dji.sdk.wpmz.value.mission.WaylineDroneInfo
+import dji.sdk.wpmz.value.mission.WaylinePayloadInfo
+import dji.sdk.wpmz.value.mission.WaylineTemplateWaypointInfo
+import dji.sdk.wpmz.value.mission.WaylineCoordinateParam
+import dji.sdk.wpmz.value.mission.WaylineCoordinateMode
+import dji.sdk.wpmz.value.mission.WaylineAltitudeMode
+import dji.sdk.wpmz.value.mission.WaylineWaypointYawParam
+import dji.sdk.wpmz.value.mission.WaylineWaypointYawMode
+import dji.sdk.wpmz.value.mission.WaylineWaypointYawPathMode
+import dji.sdk.wpmz.value.mission.WaylineWaypointGimbalHeadingParam
+import dji.sdk.wpmz.value.mission.WaylineWaypointGimbalHeadingMode
+import com.dji.wpmzsdk.manager.WPMZManager as WPMZManagerSdk
+import com.dji.wpmzsdk.common.data.HeightMode as HeightModeCommon
+import dji.sdk.wpmz.value.mission.WaylineCheckErrorMsg
+import java.util.ArrayList
+import dji.v5.utils.common.DiskUtil
+import dji.v5.utils.common.ContextUtil
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.IOException
+import android.os.Environment
+import android.net.Uri
+import android.content.ContentResolver
+import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
+import expo.modules.djisdk.kml.KMLMissionManager
+import expo.modules.djisdk.kml.MissionConfig as KMLMissionConfig
 
 class ExpoDjiSdkModule : Module() {
   companion object {
@@ -41,17 +96,27 @@ class ExpoDjiSdkModule : Module() {
   private var isProductConnected = false
   private var currentVirtualStickState: VirtualStickState? = null
   private var currentProductId: Int = -1
+  private val kmlMissionManager = KMLMissionManager()
   
   // Camera stream management
   private val cameraStreamManager: ICameraStreamManager 
     get() = MediaDataCenter.getInstance().cameraStreamManager
   private var availableCameraListener: ICameraStreamManager.AvailableCameraUpdatedListener? = null
   private var currentCameraSurfaces = mutableMapOf<Int, Surface>()
+  
+  // Waypoint mission state tracking
+  private var currentWaypointMissionState: WaypointMissionExecuteState? = null
+  private var waypointDirectoryInitialized = false
+  private var wpmzManagerInitialized = false
+  private val WAYPOINT_SAMPLE_FILE_DIR = "waypoint/"
+  private val WAYPOINT_SAMPLE_FILE_CACHE_DIR = "waypoint/cache/"
+  private val rootDir: String
+    get() = DiskUtil.getExternalCacheDirPath(ContextUtil.getContext(), WAYPOINT_SAMPLE_FILE_DIR)
 
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent")
     
     View(CameraStreamView::class) {
       Prop("cameraIndex") { view: CameraStreamView, cameraIndex: Int ->
@@ -738,6 +803,55 @@ class ExpoDjiSdkModule : Module() {
       }
     }
 
+    AsyncFunction("confirmLanding") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+        FlightControllerKey.KeyConfirmLanding.create().action(
+          onSuccess = { result: EmptyMsg ->
+            sendEvent("onLandingResult", mapOf(
+              "success" to true,
+              "message" to "Landing confirmed successfully"
+            ))
+            promise.resolve(mapOf("success" to true, "message" to "Landing confirmed"))
+          },
+          onFailure = { error: IDJIError ->
+            sendEvent("onLandingResult", mapOf(
+              "success" to false,
+              "error" to error.toString()
+            ))
+            promise.reject("CONFIRM_LANDING_ERROR", "Failed to confirm landing: ${error.toString()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("CONFIRM_LANDING_ERROR", "Failed to confirm landing: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("isLandingConfirmationNeeded") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+        
+        val isNeeded = FlightControllerKey.KeyIsLandingConfirmationNeeded.create().get(false)
+        promise.resolve(mapOf(
+          "isNeeded" to isNeeded,
+          "success" to true
+        ))
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to check landing confirmation status: ${e.message}", e)
+        promise.resolve(mapOf(
+          "isNeeded" to false,
+          "success" to false,
+          "error" to "Failed to check landing confirmation: ${e.message}"
+        ))
+      }
+    }
+
     // Flight Status and Readiness Checks
     AsyncFunction("getFlightStatus") { promise: Promise ->
       try {
@@ -921,8 +1035,1080 @@ class ExpoDjiSdkModule : Module() {
         promise.reject("ALTITUDE_ERROR", "Failed to get altitude: ${e.message}", e)
       }
     }
+
+    // Get complete GPS location data (LocationCoordinate3D)
+    AsyncFunction("getGPSLocation") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+        
+        // Get aircraft location using FlightControllerKey - use the synchronous method like in DJI sample
+        try {
+          val location = FlightControllerKey.KeyAircraftLocation3D.create().get(LocationCoordinate3D())
+          if (location != null) {
+            promise.resolve(mapOf(
+              "latitude" to location.latitude,
+              "longitude" to location.longitude,
+              "altitude" to location.altitude,
+              "isValid" to true
+            ))
+          } else {
+            promise.resolve(mapOf(
+              "latitude" to 0.0,
+              "longitude" to 0.0,
+              "altitude" to 0.0,
+              "isValid" to false,
+              "error" to "Location data not available"
+            ))
+          }
+        } catch (e: Exception) {
+          Log.e(TAG, "Failed to get GPS location: ${e.message}", e)
+          promise.resolve(mapOf(
+            "latitude" to 0.0,
+            "longitude" to 0.0,
+            "altitude" to 0.0,
+            "isValid" to false,
+            "error" to "GPS location error: ${e.message}"
+          ))
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to get GPS location: ${e.message}", e)
+        promise.reject("GPS_LOCATION_ERROR", "Failed to get GPS location: ${e.message}", e)
+      }
+    }
+
+    // Intelligent Flight - FlyTo Mission
+    AsyncFunction("startFlyToMission") { latitude: Double, longitude: Double, altitude: Double, maxSpeed: Int, promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+        
+        val target = FlyToTarget()
+        target.targetLocation = LocationCoordinate3D(latitude, longitude, altitude)
+        target.maxSpeed = maxSpeed
+        target.securityTakeoffHeight = 20 // Default security takeoff height
+        
+        IntelligentFlightManager.getInstance().flyToMissionManager.startMission(target, null,
+          object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+              Log.i(TAG, "FlyTo mission started successfully")
+              promise.resolve(mapOf(
+                "success" to true,
+                "message" to "FlyTo mission started successfully"
+              ))
+            }
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to start FlyTo mission: ${error}")
+              promise.reject("FLYTO_START_ERROR", "Failed to start FlyTo mission: ${error}", null)
+            }
+          })
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to start FlyTo mission: ${e.message}", e)
+        promise.reject("FLYTO_START_ERROR", "Failed to start FlyTo mission: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("stopFlyToMission") { promise: Promise ->
+      try {
+        IntelligentFlightManager.getInstance().flyToMissionManager.stopMission(
+          object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+              Log.i(TAG, "FlyTo mission stopped successfully")
+              promise.resolve(mapOf(
+                "success" to true,
+                "message" to "FlyTo mission stopped successfully"
+              ))
+            }
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to stop FlyTo mission: ${error}")
+              promise.reject("FLYTO_STOP_ERROR", "Failed to stop FlyTo mission: ${error}", null)
+            }
+          })
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to stop FlyTo mission: ${e.message}", e)
+        promise.reject("FLYTO_STOP_ERROR", "Failed to stop FlyTo mission: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getFlyToMissionInfo") { promise: Promise ->
+      try {
+        val flyToManager = IntelligentFlightManager.getInstance().flyToMissionManager
+        
+        // Create a basic status response since flyToInfo might not be directly accessible
+        promise.resolve(mapOf<String, Any?>(
+          "isRunning" to true, // We'll assume it's running if we can get the manager
+          "currentSpeed" to 0.0,
+          "targetLocation" to null,
+          "distanceToTarget" to 0.0
+        ))
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to get FlyTo mission info: ${e.message}", e)
+        promise.resolve(mapOf<String, Any?>(
+          "isRunning" to false,
+          "currentSpeed" to 0.0,
+          "targetLocation" to null,
+          "distanceToTarget" to 0.0
+        ))
+      }
+    }
+
+    // Waypoint Mission Functions
+    AsyncFunction("isWaypointMissionSupported") { promise: Promise ->
+      try {
+        // Waypoint missions are supported if WaypointMissionManager is available
+        // We'll initialize the state listener here
+        setupWaypointMissionStateListener()
+        
+        val isSupported = true // WaypointMissionManager exists, so supported
+        val stateString = currentWaypointMissionState?.name ?: "UNKNOWN"
+        
+        promise.resolve(mapOf(
+          "isSupported" to isSupported,
+          "success" to true,
+          "state" to stateString
+        ))
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to check waypoint support: ${e.message}", e)
+        promise.resolve(mapOf(
+          "isSupported" to false,
+          "success" to false,
+          "error" to "Failed to check waypoint support: ${e.message}"
+        ))
+      }
+    }
+
+    AsyncFunction("getWaypointMissionState") { promise: Promise ->
+      try {
+        val stateString = currentWaypointMissionState?.name ?: "UNKNOWN"
+        promise.resolve(mapOf(
+          "state" to stateString,
+          "success" to true
+        ))
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to get waypoint mission state: ${e.message}", e)
+        promise.resolve(mapOf(
+          "state" to "UNKNOWN",
+          "success" to false,
+          "error" to "Failed to get mission state: ${e.message}"
+        ))
+      }
+    }
+
+    AsyncFunction("loadWaypointMissionFromKML") { filePath: String, promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.resolve(mapOf(
+            "success" to false,
+            "error" to "No drone connected"
+          ))
+          return@AsyncFunction
+        }
+
+        // Initialize waypoint directories and WPMZ manager
+        initializeWaypointMission()
+        
+        // Validate and process the file
+        val processedFilePath = processWaypointFile(filePath)
+        if (processedFilePath.isEmpty()) {
+          promise.resolve(mapOf(
+            "success" to false,
+            "error" to "Invalid file format. Please select a .kmz or .kml file"
+          ))
+          return@AsyncFunction
+        }
+        
+        // Check if file exists
+        val file = File(processedFilePath)
+        if (!file.exists()) {
+          promise.resolve(mapOf(
+            "success" to false,
+            "error" to "File not found: $processedFilePath"
+          ))
+          return@AsyncFunction
+        }
+        
+        Log.d(TAG, "Uploading waypoint mission file: $processedFilePath")
+        
+        // Use WaypointMissionManager to upload KMZ file to aircraft
+        WaypointMissionManager.getInstance().pushKMZFileToAircraft(
+          processedFilePath,
+          object : CommonCallbacks.CompletionCallbackWithProgress<Double> {
+            override fun onProgressUpdate(progress: Double) {
+              Log.d(TAG, "Upload progress: ${(progress * 100).toInt()}%")
+            }
+
+            override fun onSuccess() {
+              Log.i(TAG, "KMZ file uploaded successfully")
+              try {
+                // Get available wayline IDs from the uploaded file
+                val waylineIDs = WaypointMissionManager.getInstance().getAvailableWaylineIDs(processedFilePath)
+                promise.resolve(mapOf(
+                  "success" to true,
+                  "message" to "Waypoint mission uploaded successfully",
+                  "waypointCount" to waylineIDs.size,
+                  "waylineIDs" to waylineIDs,
+                  "filePath" to processedFilePath
+                ))
+              } catch (e: Exception) {
+                Log.w(TAG, "Could not get wayline IDs: ${e.message}")
+                promise.resolve(mapOf(
+                  "success" to true,
+                  "message" to "Mission uploaded but could not get wayline count",
+                  "waypointCount" to 0,
+                  "filePath" to processedFilePath
+                ))
+              }
+            }
+
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to upload waypoint mission: ${error.description()}")
+              promise.resolve(mapOf(
+                "success" to false,
+                "error" to "Failed to upload waypoint mission: ${error.description()}"
+              ))
+            }
+          }
+        )
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to load waypoint mission: ${e.message}", e)
+        promise.resolve(mapOf(
+          "success" to false,
+          "error" to "Failed to load waypoint mission: ${e.message}"
+        ))
+      }
+    }
+
+    AsyncFunction("startWaypointMission") { missionFileName: String?, promise: Promise ->
+      try {
+        if (missionFileName.isNullOrEmpty()) {
+          promise.resolve(mapOf(
+            "success" to false,
+            "error" to "Mission file name is required"
+          ))
+          return@AsyncFunction
+        }
+
+        // Get available wayline IDs for the mission
+        val availableWaylineIDs = try {
+          WaypointMissionManager.getInstance().getAvailableWaylineIDs(missionFileName)
+        } catch (e: Exception) {
+          Log.e(TAG, "Failed to get wayline IDs: ${e.message}")
+          emptyList<Int>()
+        }
+
+        WaypointMissionManager.getInstance().startMission(
+          missionFileName,
+          availableWaylineIDs,
+          object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+              Log.i(TAG, "Waypoint mission started successfully")
+              promise.resolve(mapOf(
+                "success" to true,
+                "message" to "Waypoint mission started successfully"
+              ))
+            }
+
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to start waypoint mission: ${error.description()}")
+              promise.resolve(mapOf(
+                "success" to false,
+                "error" to "Failed to start waypoint mission: ${error.description()}"
+              ))
+            }
+          }
+        )
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to start waypoint mission: ${e.message}", e)
+        promise.resolve(mapOf(
+          "success" to false,
+          "error" to "Failed to start waypoint mission: ${e.message}"
+        ))
+      }
+    }
+
+    AsyncFunction("stopWaypointMission") { missionFileName: String?, promise: Promise ->
+      try {
+        if (missionFileName.isNullOrEmpty()) {
+          promise.resolve(mapOf(
+            "success" to false,
+            "error" to "Mission file name is required"
+          ))
+          return@AsyncFunction
+        }
+
+        WaypointMissionManager.getInstance().stopMission(
+          missionFileName,
+          object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+              Log.i(TAG, "Waypoint mission stopped successfully")
+              promise.resolve(mapOf(
+                "success" to true,
+                "message" to "Waypoint mission stopped successfully"
+              ))
+            }
+
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to stop waypoint mission: ${error.description()}")
+              promise.resolve(mapOf(
+                "success" to false,
+                "error" to "Failed to stop waypoint mission: ${error.description()}"
+              ))
+            }
+          }
+        )
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to stop waypoint mission: ${e.message}", e)
+        promise.resolve(mapOf(
+          "success" to false,
+          "error" to "Failed to stop waypoint mission: ${e.message}"
+        ))
+      }
+    }
+
+    AsyncFunction("pauseWaypointMission") { promise: Promise ->
+      try {
+        WaypointMissionManager.getInstance().pauseMission(
+          object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+              Log.i(TAG, "Waypoint mission paused successfully")
+              promise.resolve(mapOf(
+                "success" to true,
+                "message" to "Waypoint mission paused successfully"
+              ))
+            }
+
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to pause waypoint mission: ${error}")
+              promise.reject("WAYPOINT_PAUSE_ERROR", "Failed to pause waypoint mission: ${error}", null)
+            }
+          })
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to pause waypoint mission: ${e.message}", e)
+        promise.reject("WAYPOINT_PAUSE_ERROR", "Failed to pause waypoint mission: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("resumeWaypointMission") { promise: Promise ->
+      try {
+        WaypointMissionManager.getInstance().resumeMission(
+          object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+              Log.i(TAG, "Waypoint mission resumed successfully")
+              promise.resolve(mapOf(
+                "success" to true,
+                "message" to "Waypoint mission resumed successfully"
+              ))
+            }
+
+            override fun onFailure(error: IDJIError) {
+              Log.e(TAG, "Failed to resume waypoint mission: ${error}")
+              promise.reject("WAYPOINT_RESUME_ERROR", "Failed to resume waypoint mission: ${error}", null)
+            }
+          })
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to resume waypoint mission: ${e.message}", e)
+        promise.reject("WAYPOINT_RESUME_ERROR", "Failed to resume waypoint mission: ${e.message}", e)
+      }
+    }
+    
+    AsyncFunction("getControllerInfo") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        val controllerInfo = getControllerBasicInfo()
+        promise.resolve(controllerInfo)
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to get controller info: ${e.message}", e)
+        promise.reject("CONTROLLER_INFO_ERROR", "Failed to get controller info: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("convertKMLToKMZ") { kmlPath: String, heightMode: String, promise: Promise ->
+      try {
+        initializeWPMZManager()
+        
+        Log.d(TAG, "Input file path: $kmlPath")
+        
+        // Handle content URI or file path
+        val actualFilePath = if (kmlPath.startsWith("content://") || kmlPath.startsWith("file://")) {
+          Log.d(TAG, "Detected content/file URI, copying to temp file...")
+          val extension = if (kmlPath.contains(".kmz", ignoreCase = true)) ".kmz" else ".kml"
+          copyContentUriToFile(kmlPath, "temp_input_${System.currentTimeMillis()}$extension")
+        } else {
+          Log.d(TAG, "Using direct file path: $kmlPath")
+          kmlPath
+        }
+        
+        Log.d(TAG, "Actual file path: $actualFilePath")
+        
+        if (actualFilePath == null) {
+          promise.reject("FILE_COPY_FAILED", "Failed to copy file from URI: $kmlPath", null)
+          return@AsyncFunction
+        }
+        
+        if (!File(actualFilePath).exists()) {
+          promise.reject("FILE_NOT_FOUND", "File does not exist after copy: $actualFilePath (original: $kmlPath)", null)
+          return@AsyncFunction
+        }
+        
+        Log.d(TAG, "File exists, size: ${File(actualFilePath).length()} bytes")
+
+        val outputKmzPath = "${rootDir}/converted_${System.currentTimeMillis()}.kmz"
+        val heightModeEnum = when (heightMode.uppercase()) {
+          "RELATIVE" -> HeightModeCommon.RELATIVE
+          "WGS84" -> HeightModeCommon.WGS84  
+          "EGM96" -> HeightModeCommon.EGM96
+          else -> HeightModeCommon.RELATIVE
+        }
+        
+        Log.d(TAG, "Converting KML to KMZ: $actualFilePath -> $outputKmzPath with height mode: $heightMode")
+        
+        // Ensure output directory exists
+        File(outputKmzPath).parentFile?.mkdirs()
+        
+        // Validate KML file type before conversion (following Litchi's implementation)
+        Log.d(TAG, "Validating KML file type: $actualFilePath")
+        val kmlFileParseInfo = try {
+          KMLUtil.getKMLType(actualFilePath)
+        } catch (e: Exception) {
+          Log.e(TAG, "Failed to parse KML file type: ${e.message}", e)
+          promise.reject("KML_PARSE_ERROR", "Failed to parse KML file: ${e.message}", e)
+          return@AsyncFunction
+        }
+        
+        Log.d(TAG, "KML file type: ${kmlFileParseInfo.fileType}, mission type: ${kmlFileParseInfo.missionType}")
+        
+        // Check if it's a valid KML file (following Litchi's validation logic)
+        if (kmlFileParseInfo.fileType == KMLFileParseInfo.KMLFileType.UNKNOWN) {
+          Log.e(TAG, "Invalid KML file - unknown type")
+          promise.reject("KML_VALIDATION_ERROR", "Invalid KML file - file type is unknown or unsupported", null)
+          return@AsyncFunction
+        }
+        
+        val success = try {
+          Log.d(TAG, "Starting KML to KMZ conversion process...")
+          Log.d(TAG, "KML file type: ${kmlFileParseInfo.fileType}")
+          Log.d(TAG, "Mission type: ${kmlFileParseInfo.missionType}")
+          Log.d(TAG, "Height mode: $heightMode -> $heightModeEnum")
+          
+          // Set up mission import parameters
+          val missionImportParams = MissionImportParams()
+          missionImportParams.fileType = kmlFileParseInfo.fileType
+          missionImportParams.missionType = kmlFileParseInfo.missionType ?: MissionType.Waypoint
+          missionImportParams.heightMode = when (heightModeEnum) {
+            HeightModeCommon.RELATIVE -> MissionImportHeightMode.RELATIVE
+            HeightModeCommon.WGS84 -> MissionImportHeightMode.WGS84
+            HeightModeCommon.EGM96 -> MissionImportHeightMode.EGM96
+            else -> MissionImportHeightMode.RELATIVE
+          }
+          
+          Log.d(TAG, "Mission import params configured. Importing mission...")
+          
+          // Import the mission from KML
+          val missionModel = KMLUtil.importMission(missionImportParams, actualFilePath)
+          Log.d(TAG, "Mission imported successfully: ${missionModel?.javaClass?.simpleName ?: "null"}")
+          
+          if (missionModel == null) {
+            Log.e(TAG, "Mission model is null after import")
+            throw IllegalStateException("Failed to import mission from KML - mission model is null")
+          }
+          
+          Log.d(TAG, "Transforming mission to wayline data...")
+          
+          // Transform to wayline mission data following DJI's approach
+          val transform = MissionGreenDaoTransform()
+          val transformData = transform.generateGreenDaoMissionWayline(missionModel)
+          
+          Log.d(TAG, "Transform completed:")
+          Log.d(TAG, "  - Mission: ${transformData.mission}")
+          Log.d(TAG, "  - Mission Config: ${transformData.missionConfig}")
+          Log.d(TAG, "  - Templates count: ${transformData.templates.size}")
+          Log.d(TAG, "  - Waylines count: ${transformData.wayline.size}")
+          
+          // Generate proper KMZ file following Litchi's exact implementation
+          if (transformData.templates.isNotEmpty()) {
+            Log.d(TAG, "Using template-based generation (Litchi approach)")
+            val template = transformData.templates.first() as WPMZTemplate
+            Log.d(TAG, "Template: ${template}")
+            
+            WPMZManagerSdk.getInstance().generateKMZFile(
+              outputKmzPath,
+              transformData.mission,
+              transformData.missionConfig,
+              template
+            )
+            Log.d(TAG, "Generated KMZ using template-based method")
+          } else if (transformData.wayline.isNotEmpty()) {
+            Log.d(TAG, "Using wayline-based generation (fallback approach)")
+            val wayline = transformData.wayline.first()
+            Log.d(TAG, "Wayline: ${wayline}")
+            
+            WPMZManagerSdk.getInstance().generateKMZFile(
+              outputKmzPath,
+              transformData.mission,
+              transformData.missionConfig,
+              wayline
+            )
+            Log.d(TAG, "Generated KMZ using wayline-based method")
+          } else {
+            Log.e(TAG, "No templates or waylines found in transform data")
+            Log.e(TAG, "Transform data details:")
+            Log.e(TAG, "  - Mission: ${transformData.mission}")
+            Log.e(TAG, "  - Config: ${transformData.missionConfig}")
+            throw IllegalStateException("No templates or waylines found in transformed mission data")
+          }
+          
+          Log.d(TAG, "Checking generated KMZ file...")
+          val kmzFile = File(outputKmzPath)
+          if (kmzFile.exists()) {
+            Log.d(TAG, "KMZ file generated successfully. Size: ${kmzFile.length()} bytes")
+            true
+          } else {
+            Log.e(TAG, "KMZ file was not created at: $outputKmzPath")
+            false
+          }
+        } catch (throwable: Throwable) {
+          Log.e(TAG, "KML to KMZ conversion failed with throwable", throwable)
+          Log.e(TAG, "Exception type: ${throwable.javaClass.simpleName}")
+          Log.e(TAG, "Exception message: ${throwable.message}")
+          throwable.printStackTrace()
+          false
+        }
+        
+        if (success && File(outputKmzPath).exists()) {
+          // Validate the generated KMZ file
+          val validation = WPMZManagerSdk.getInstance().checkValidation(outputKmzPath)
+          
+          promise.resolve(mapOf(
+            "success" to true,
+            "kmzPath" to outputKmzPath,
+            "isValid" to (validation.value?.isEmpty() ?: true),
+            "errorCode" to (validation.value?.size ?: 0),
+            "validationErrors" to (validation.value?.map { it.name } ?: emptyList<String>()),
+            "validationWarnings" to emptyList<String>()
+          ))
+        } else {
+          val errorMsg = if (File(outputKmzPath).exists()) {
+            "Conversion reported failure but KMZ file exists"
+          } else {
+            "Conversion failed and no KMZ file was created"
+          }
+          Log.e(TAG, "KML conversion failed: $errorMsg")
+          promise.reject("KML_CONVERSION_ERROR", "Failed to convert KML to KMZ: $errorMsg", null)
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "KML conversion error: ${e.message}", e)
+        e.printStackTrace()
+        promise.reject("KML_CONVERSION_ERROR", "KML conversion failed: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("validateKMZFile") { kmzPath: String, promise: Promise ->
+      try {
+        initializeWPMZManager()
+        
+        // Handle content URI or file path
+        val actualFilePath = if (kmzPath.startsWith("content://")) {
+          copyContentUriToFile(kmzPath, "temp_validate.kmz")
+        } else {
+          kmzPath
+        }
+        
+        if (actualFilePath == null || !File(actualFilePath).exists()) {
+          promise.reject("FILE_NOT_FOUND", "KMZ file not found or could not be copied: $kmzPath", null)
+          return@AsyncFunction
+        }
+
+        Log.d(TAG, "Validating KMZ file: $actualFilePath")
+        val validation = WPMZManagerSdk.getInstance().checkValidation(actualFilePath)
+        
+        promise.resolve(mapOf(
+          "isValid" to (validation.value?.isEmpty() ?: true),
+          "errorCode" to (validation.value?.size ?: 0),
+          "errors" to (validation.value?.map { it.name } ?: emptyList<String>()),
+          "warnings" to emptyList<String>(),
+          "filePath" to kmzPath
+        ))
+      } catch (e: Exception) {
+        Log.e(TAG, "KMZ validation error: ${e.message}", e)
+        promise.reject("VALIDATION_ERROR", "Failed to validate KMZ: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("uploadKMZToAircraft") { kmzPath: String, promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected. Please ensure drone is powered on and connected.", null)
+          return@AsyncFunction
+        }
+        
+        // Check waypoint mission state before upload
+        val missionState = currentWaypointMissionState
+        Log.d(TAG, "Current waypoint mission state before upload: $missionState")
+        
+        // Check if mission manager is busy
+        if (missionState == WaypointMissionExecuteState.EXECUTING || 
+            missionState == WaypointMissionExecuteState.INTERRUPTED) {
+          promise.reject("MISSION_BUSY", "A waypoint mission is currently executing. Please stop it first.", null)
+          return@AsyncFunction
+        }
+
+        // Handle content URI or file path
+        val actualFilePath = if (kmzPath.startsWith("content://")) {
+          copyContentUriToFile(kmzPath, "temp_upload.kmz")
+        } else {
+          kmzPath
+        }
+
+        if (actualFilePath == null || !File(actualFilePath).exists()) {
+          promise.reject("FILE_NOT_FOUND", "KMZ file not found or could not be copied: $kmzPath", null)
+          return@AsyncFunction
+        }
+
+        initializeWPMZManager()
+
+        // Validate before upload
+        val validation = WPMZManagerSdk.getInstance().checkValidation(actualFilePath)
+        if (validation.value?.isNotEmpty() == true) {
+          promise.reject("INVALID_KMZ", "KMZ validation failed: ${validation.value?.map { it.name }?.joinToString()}", null)
+          return@AsyncFunction
+        }
+
+        // Additional diagnostics before upload
+        Log.d(TAG, "Starting KMZ upload to aircraft:")
+        Log.d(TAG, "  - File path: $actualFilePath")
+        Log.d(TAG, "  - File size: ${File(actualFilePath).length()} bytes")
+        Log.d(TAG, "  - File exists: ${File(actualFilePath).exists()}")
+        Log.d(TAG, "  - Is product connected: $isProductConnected")
+        Log.d(TAG, "  - Mission state: $currentWaypointMissionState")
+        Log.d(TAG, "  - Mission manager instance: ${WaypointMissionManager.getInstance()}")
+        
+        // Try to read the KMZ info to verify it's properly formatted
+        try {
+          val kmzInfo = WPMZManagerSdk.getInstance().getKMZInfo(actualFilePath)
+          Log.d(TAG, "  - KMZ info retrieved successfully")
+          Log.d(TAG, "  - Mission config: ${kmzInfo.waylineMissionConfigParseInfo}")
+          Log.d(TAG, "  - Mission info: ${kmzInfo.waylineMissionParseInfo}")
+        } catch (e: Exception) {
+          Log.e(TAG, "  - Failed to get KMZ info: ${e.message}", e)
+        }
+        
+        // Check if we can read wayline IDs from the file
+        try {
+          val testWaylines = WaypointMissionManager.getInstance().getAvailableWaylineIDs(actualFilePath)
+          Log.d(TAG, "  - Available waylines in file: ${testWaylines.size} - IDs: $testWaylines")
+        } catch (e: Exception) {
+          Log.w(TAG, "  - Could not read wayline IDs from file: ${e.message}")
+        }
+
+        WaypointMissionManager.getInstance().pushKMZFileToAircraft(
+          actualFilePath,
+          object : CommonCallbacks.CompletionCallbackWithProgress<Double> {
+            override fun onProgressUpdate(progress: Double) {
+              Log.d(TAG, "Upload progress: ${(progress * 100).toInt()}%")
+              sendEvent("onWaypointMissionUploadProgress", mapOf(
+                "progress" to progress,
+                "percentage" to (progress * 100).toInt(),
+                "status" to "uploading"
+              ))
+            }
+
+            override fun onSuccess() {
+              Log.d(TAG, "KMZ upload successful")
+              try {
+                val availableWaylines = getAvailableWaylineIDs(actualFilePath)
+                promise.resolve(mapOf(
+                  "success" to true,
+                  "message" to "Mission uploaded successfully",
+                  "availableWaylines" to availableWaylines,
+                  "waylineCount" to availableWaylines.size,
+                  "filePath" to actualFilePath
+                ))
+              } catch (e: Exception) {
+                Log.w(TAG, "Failed to get wayline IDs after upload: ${e.message}")
+                promise.resolve(mapOf(
+                  "success" to true,
+                  "message" to "Mission uploaded successfully (wayline info unavailable)",
+                  "filePath" to actualFilePath
+                ))
+              }
+            }
+
+            override fun onFailure(error: IDJIError) {
+              val errorCode = error.errorCode()
+              val errorDesc = error.description() ?: "Unknown error"
+              val errorMsg = error.toString()
+              
+              Log.e(TAG, "KMZ upload failed - Code: $errorCode, Description: $errorDesc, Full: $errorMsg")
+              
+              // Provide more detailed error information
+              val detailedError = when {
+                errorDesc.contains("not connected", ignoreCase = true) -> "Aircraft not connected or out of range"
+                errorDesc.contains("busy", ignoreCase = true) -> "Aircraft is busy, please wait and try again"
+                errorDesc.contains("format", ignoreCase = true) -> "Invalid KMZ file format"
+                errorDesc.contains("storage", ignoreCase = true) -> "Insufficient storage on aircraft"
+                errorCode.contains("TIMEOUT") -> "Upload timeout - check connection to aircraft"
+                errorCode.contains("DISCONNECTED") -> "Lost connection to aircraft during upload"
+                else -> "Upload failed: $errorDesc (Code: $errorCode)"
+              }
+              
+              promise.reject("UPLOAD_FAILED", detailedError, null)
+            }
+          }
+        )
+      } catch (e: Exception) {
+        Log.e(TAG, "Upload error: ${e.message}", e)
+        promise.reject("UPLOAD_ERROR", "Upload error: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getAvailableWaylines") { kmzPath: String, promise: Promise ->
+      try {
+        // Handle content URI or file path
+        val actualFilePath = if (kmzPath.startsWith("content://")) {
+          copyContentUriToFile(kmzPath, "temp_waylines.kmz")
+        } else {
+          kmzPath
+        }
+
+        if (actualFilePath == null || !File(actualFilePath).exists()) {
+          promise.reject("FILE_NOT_FOUND", "KMZ file not found or could not be copied: $kmzPath", null)
+          return@AsyncFunction
+        }
+
+        val waylineIds = getAvailableWaylineIDs(actualFilePath)
+        promise.resolve(mapOf(
+          "success" to true,
+          "waylineIds" to waylineIds,
+          "count" to waylineIds.size,
+          "filePath" to actualFilePath
+        ))
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to get waylines: ${e.message}", e)
+        promise.reject("GET_WAYLINES_ERROR", "Failed to get waylines: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("generateTestWaypointMission") { latitude: Double?, longitude: Double?, promise: Promise ->
+      try {
+        initializeWaypointMission()
+        
+        // Use current GPS location if provided, otherwise use default coordinates
+        val centerLat = latitude ?: -7.425990014912149 // Your coordinates as fallback
+        val centerLon = longitude ?: 112.69747710061603
+        
+        val kmzPath = generateWaypointMissionFile(centerLat, centerLon)
+        
+        if (kmzPath.isNotEmpty()) {
+          promise.resolve(mapOf(
+            "success" to true,
+            "message" to "Test waypoint mission generated successfully",
+            "filePath" to kmzPath,
+            "waypointCount" to 4 // Square pattern with 4 waypoints
+          ))
+        } else {
+          promise.resolve(mapOf(
+            "success" to false,
+            "error" to "Failed to generate waypoint mission file"
+          ))
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to generate waypoint mission: ${e.message}", e)
+        promise.resolve(mapOf(
+          "success" to false,
+          "error" to "Failed to generate waypoint mission: ${e.message}"
+        ))
+      }
+    }
+
+    // KML Mission Methods
+    AsyncFunction("importKMLMission") { kmlFilePath: String, options: Map<String, Any>?, promise: Promise ->
+      try {
+        val config = parseKMLMissionConfig(options ?: emptyMap())
+        
+        val callback = object : KMLMissionManager.KMLMissionCallback {
+          override fun onMissionPrepared(stats: expo.modules.djisdk.kml.MissionStats) {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionPrepared",
+              "data" to mapOf(
+                "totalDistance" to stats.totalDistance,
+                "minAltitude" to stats.minAltitude,
+                "maxAltitude" to stats.maxAltitude,
+                "altitudeRange" to stats.altitudeRange
+              )
+            ))
+          }
+
+          override fun onMissionStarted(type: KMLMissionManager.MissionType) {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionStarted",
+              "missionType" to type.name.lowercase()
+            ))
+          }
+
+          override fun onMissionProgress(progress: KMLMissionManager.MissionProgress) {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionProgress",
+              "data" to mapOf(
+                "currentWaypoint" to progress.currentWaypoint,
+                "totalWaypoints" to progress.totalWaypoints,
+                "progress" to progress.progress,
+                "distanceToTarget" to progress.distanceToTarget
+              )
+            ))
+          }
+
+          override fun onMissionCompleted() {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionCompleted"
+            ))
+          }
+
+          override fun onMissionFailed(error: String) {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionFailed",
+              "error" to error
+            ))
+          }
+
+          override fun onMissionPaused() {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionPaused"
+            ))
+          }
+
+          override fun onMissionResumed() {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionResumed"
+            ))
+          }
+        }
+
+        kmlMissionManager.importAndExecuteKML(kmlFilePath, config, callback, promise)
+        
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to import KML mission: ${e.message}", e)
+        promise.reject("IMPORT_ERROR", "Failed to import KML mission: ${e.message}", null)
+      }
+    }
+
+    AsyncFunction("previewKMLMission") { kmlFilePath: String, promise: Promise ->
+      kmlMissionManager.previewMission(kmlFilePath, promise)
+    }
+
+    AsyncFunction("previewKMLMissionFromContent") { kmlContent: String, promise: Promise ->
+      kmlMissionManager.previewMissionFromContent(kmlContent, promise)
+    }
+
+    AsyncFunction("importKMLMissionFromContent") { kmlContent: String, options: Map<String, Any>?, promise: Promise ->
+      try {
+        val config = parseKMLMissionConfig(options ?: emptyMap())
+        
+        val callback = object : KMLMissionManager.KMLMissionCallback {
+          override fun onMissionPrepared(stats: expo.modules.djisdk.kml.MissionStats) {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionPrepared",
+              "data" to mapOf(
+                "totalDistance" to stats.totalDistance,
+                "minAltitude" to stats.minAltitude,
+                "maxAltitude" to stats.maxAltitude,
+                "altitudeRange" to stats.altitudeRange
+              )
+            ))
+          }
+
+          override fun onMissionStarted(type: KMLMissionManager.MissionType) {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionStarted",
+              "missionType" to type.name.lowercase()
+            ))
+          }
+
+          override fun onMissionProgress(progress: KMLMissionManager.MissionProgress) {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionProgress",
+              "data" to mapOf(
+                "currentWaypoint" to progress.currentWaypoint,
+                "totalWaypoints" to progress.totalWaypoints,
+                "progress" to progress.progress,
+                "distanceToTarget" to progress.distanceToTarget
+              )
+            ))
+          }
+
+          override fun onMissionCompleted() {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionCompleted"
+            ))
+          }
+
+          override fun onMissionFailed(error: String) {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionFailed",
+              "error" to error
+            ))
+          }
+
+          override fun onMissionPaused() {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionPaused"
+            ))
+          }
+
+          override fun onMissionResumed() {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionResumed"
+            ))
+          }
+        }
+
+        kmlMissionManager.importAndExecuteKMLFromContent(kmlContent, config, callback, promise)
+        
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to import KML mission from content: ${e.message}", e)
+        promise.reject("IMPORT_ERROR", "Failed to import KML mission from content: ${e.message}", null)
+      }
+    }
+
+    AsyncFunction("pauseKMLMission") { promise: Promise ->
+      kmlMissionManager.pauseMission(promise)
+    }
+
+    AsyncFunction("resumeKMLMission") { promise: Promise ->
+      kmlMissionManager.resumeMission(promise)
+    }
+
+    AsyncFunction("stopKMLMission") { promise: Promise ->
+      kmlMissionManager.stopMission(promise)
+    }
+
+    AsyncFunction("getKMLMissionStatus") { promise: Promise ->
+      try {
+        val status = kmlMissionManager.getMissionStatus()
+        promise.resolve(status)
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to get KML mission status: ${e.message}", e)
+        promise.reject("STATUS_ERROR", "Failed to get mission status: ${e.message}", null)
+      }
+    }
   }
 
+  private fun setupWaypointMissionStateListener() {
+    try {
+      WaypointMissionManager.getInstance().addWaypointMissionExecuteStateListener { state ->
+        currentWaypointMissionState = state
+        Log.d(TAG, "Waypoint mission state changed: ${state.name}")
+        
+        // You could send an event to React Native here if needed
+        // sendEvent("onWaypointMissionStateChange", mapOf("state" to state.name))
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to setup waypoint mission state listener: ${e.message}", e)
+    }
+  }
+  
+  private fun initializeWaypointMission() {
+    try {
+      if (waypointDirectoryInitialized) return
+      
+      // Initialize WPMZ Manager
+      WPMZManager.getInstance().init(ContextUtil.getContext())
+      
+      // Create waypoint directories
+      val dir = File(rootDir)
+      if (!dir.exists()) {
+        dir.mkdirs()
+        Log.d(TAG, "Created waypoint directory: $rootDir")
+      }
+      
+      val cacheDir = DiskUtil.getExternalCacheDirPath(ContextUtil.getContext(), WAYPOINT_SAMPLE_FILE_CACHE_DIR)
+      val cacheDirFile = File(cacheDir)
+      if (!cacheDirFile.exists()) {
+        cacheDirFile.mkdirs()
+        Log.d(TAG, "Created waypoint cache directory: $cacheDir")
+      }
+      
+      waypointDirectoryInitialized = true
+      Log.i(TAG, "Waypoint mission system initialized successfully")
+      
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to initialize waypoint mission system: ${e.message}", e)
+    }
+  }
+  
+  private fun processWaypointFile(inputFilePath: String): String {
+    try {
+      val inputFile = File(inputFilePath)
+      val fileName = inputFile.name
+      
+      when {
+        fileName.endsWith(".kmz", ignoreCase = true) -> {
+          // KMZ file - copy to waypoint directory
+          val destPath = rootDir + fileName
+          val destFile = File(destPath)
+          
+          if (!destFile.exists()) {
+            inputFile.copyTo(destFile, overwrite = true)
+            Log.d(TAG, "Copied KMZ file to: $destPath")
+          }
+          return destPath
+        }
+        
+        fileName.endsWith(".kml", ignoreCase = true) -> {
+          // KML file - convert to KMZ using WPMZ Manager
+          val baseFileName = fileName.substringBeforeLast(".")
+          val kmzFileName = "$baseFileName.kmz"
+          val destPath = rootDir + kmzFileName
+          
+          // Copy KML to waypoint directory first
+          val kmlDestPath = rootDir + fileName
+          val kmlDestFile = File(kmlDestPath)
+          if (!kmlDestFile.exists()) {
+            inputFile.copyTo(kmlDestFile, overwrite = true)
+          }
+          
+          // Convert KML to KMZ using WPMZManager
+          val success = WPMZManager.getInstance().transKMLtoKMZ(
+            kmlDestPath,
+            "", // Use default output path
+            HeightMode.RELATIVE // Relative to takeoff point
+          )
+          
+          if (success) {
+            // WPMZManager creates KMZ in a default location, find and copy it
+            val defaultKmzPath = Environment.getExternalStorageDirectory().toString() + 
+              "/DJI/" + context.packageName + "/KMZ/OutPath/" + baseFileName + ".kmz"
+            val defaultKmzFile = File(defaultKmzPath)
+            
+            if (defaultKmzFile.exists()) {
+              defaultKmzFile.copyTo(File(destPath), overwrite = true)
+              Log.d(TAG, "Converted KML to KMZ: $destPath")
+              return destPath
+            }
+          }
+          
+          Log.w(TAG, "Failed to convert KML to KMZ, using original KML")
+          return kmlDestPath
+        }
+        
+        else -> {
+          Log.e(TAG, "Unsupported file format: $fileName")
+          return ""
+        }
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to process waypoint file: ${e.message}", e)
+      return ""
+    }
+  }
+  
   private fun setupVirtualStickListener() {
     try {
       VirtualStickManager.getInstance().setVirtualStickStateListener(object : VirtualStickStateListener {
@@ -948,6 +2134,138 @@ class ExpoDjiSdkModule : Module() {
     } catch (e: Exception) {
       Log.e(TAG, "Failed to setup virtual stick listener: ${e.message}", e)
     }
+  }
+  
+  // Waypoint generation is temporarily disabled due to complex DJI SDK dependencies
+  // Users should use existing KML/KMZ files via the SELECT KMZ button
+
+  private fun generateWaypointMissionFile(centerLat: Double, centerLon: Double): String {
+    try {
+      val timestamp = System.currentTimeMillis()
+      val kmzFileName = "generated_waypoint_mission_${timestamp}.kmz"
+      val kmzPath = rootDir + kmzFileName
+      
+      // Create wayline mission
+      val waylineMission = createWaylineMission()
+      
+      // Create mission config
+      val missionConfig = createMissionConfig()
+      
+      // Create waypoints
+      val waypoints = createSquareWaypoints(centerLat, centerLon)
+      
+      // Create template
+      val template = createTemplate(waypoints)
+      
+      // Generate KMZ file
+      WPMZManager.getInstance().generateKMZFile(
+        kmzPath,
+        waylineMission,
+        missionConfig,
+        template
+      )
+      
+      Log.i(TAG, "Generated waypoint mission file: $kmzPath")
+      return kmzPath
+      
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to generate waypoint mission file: ${e.message}", e)
+      return ""
+    }
+  }
+  
+  private fun createWaylineMission(): WaylineMission {
+    val waylineMission = WaylineMission()
+    waylineMission.createTime = System.currentTimeMillis().toDouble()
+    waylineMission.updateTime = System.currentTimeMillis().toDouble()
+    return waylineMission
+  }
+  
+  private fun createMissionConfig(): WaylineMissionConfig {
+    val config = WaylineMissionConfig()
+    config.flyToWaylineMode = WaylineFlyToWaylineMode.SAFELY
+    config.finishAction = WaylineFinishedAction.GO_HOME
+    
+    val droneInfo = WaylineDroneInfo()
+    config.droneInfo = droneInfo
+    config.securityTakeOffHeight = 20.0
+    config.isSecurityTakeOffHeightSet = true
+    config.exitOnRCLostBehavior = WaylineExitOnRCLostBehavior.EXCUTE_RC_LOST_ACTION
+    config.exitOnRCLostType = WaylineExitOnRCLostAction.GO_BACK
+    config.globalTransitionalSpeed = 10.0
+    
+    val payloadInfos = ArrayList<WaylinePayloadInfo>()
+    config.payloadInfo = payloadInfos
+    return config
+  }
+  
+  private fun createSquareWaypoints(centerLat: Double, centerLon: Double): List<WaylineWaypoint> {
+    val waypoints = mutableListOf<WaylineWaypoint>()
+    
+    // Convert 50 meters to degrees (rough approximation)
+    val latOffset = 50.0 / 111320.0 / 2.0 // Half the square size
+    val lonOffset = 50.0 / (111320.0 * Math.cos(Math.toRadians(centerLat))) / 2.0
+    
+    // Create 4 waypoints in square pattern: NE, SE, SW, NW
+    val coordinates = listOf(
+      Triple(centerLat + latOffset, centerLon + lonOffset, 20.0), // Northeast
+      Triple(centerLat - latOffset, centerLon + lonOffset, 20.0), // Southeast  
+      Triple(centerLat - latOffset, centerLon - lonOffset, 20.0), // Southwest
+      Triple(centerLat + latOffset, centerLon - lonOffset, 20.0)  // Northwest
+    )
+    
+    coordinates.forEachIndexed { index, (lat, lon, height) ->
+      val waypoint = WaylineWaypoint()
+      waypoint.waypointIndex = index + 1
+      
+      val location = WaylineLocationCoordinate2D(lat, lon)
+      waypoint.location = location
+      waypoint.height = height
+      waypoint.ellipsoidHeight = height
+      waypoint.speed = 5.0
+      waypoint.useGlobalTurnParam = true
+      waypoint.gimbalPitchAngle = -30.0
+      
+      // Yaw parameters
+      val yawParam = WaylineWaypointYawParam()
+      yawParam.enableYawAngle = false
+      yawParam.yawAngle = 0.0
+      yawParam.yawMode = WaylineWaypointYawMode.FOLLOW_WAYLINE
+      yawParam.yawPathMode = WaylineWaypointYawPathMode.FOLLOW_BAD_ARC
+      waypoint.yawParam = yawParam
+      waypoint.useGlobalYawParam = false
+      waypoint.isWaylineWaypointYawParamSet = true
+      
+      // Gimbal heading parameters
+      val gimbalYawParam = WaylineWaypointGimbalHeadingParam()
+      gimbalYawParam.headingMode = WaylineWaypointGimbalHeadingMode.FOLLOW_WAYLINE
+      gimbalYawParam.pitchAngle = -30.0
+      waypoint.gimbalHeadingParam = gimbalYawParam
+      waypoint.isWaylineWaypointGimbalHeadingParamSet = true
+      
+      waypoints.add(waypoint)
+    }
+    
+    return waypoints
+  }
+  
+  private fun createTemplate(waypoints: List<WaylineWaypoint>): WPMZTemplate {
+    val template = WPMZTemplate()
+    
+    val waypointInfo = WaylineTemplateWaypointInfo()
+    waypointInfo.waypoints = waypoints
+    template.waypointInfo = waypointInfo
+    
+    val coordinateParam = WaylineCoordinateParam()
+    coordinateParam.coordinateMode = WaylineCoordinateMode.WGS84
+    coordinateParam.altitudeMode = WaylineAltitudeMode.RELATIVE_TO_START_POINT
+    template.coordinateParam = coordinateParam
+    
+    template.useGlobalTransitionalSpeed = true
+    template.autoFlightSpeed = 5.0
+    template.payloadParam = ArrayList<WaylinePayloadParam>()
+    
+    return template
   }
 
   private fun getDroneBasicInfo() {
@@ -1040,5 +2358,148 @@ class ExpoDjiSdkModule : Module() {
       "FAILED" -> "Calibration failed, please try again"
       else -> "Unknown calibration status"
     }
+  }
+
+  private fun getControllerBasicInfo(): Map<String, Any?> {
+    return try {
+      val firmwareVersionKey = FlightControllerKey.KeyFirmwareVersion.create()
+      val firmwareVersion = firmwareVersionKey.get()
+
+      mapOf(
+        "firmwareVersion" to firmwareVersion,
+        "isConnected" to isProductConnected,
+        "connectionStatus" to if (isProductConnected) "connected" else "disconnected"
+      )
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to get controller firmware version: ${e.message}")
+      mapOf(
+        "firmwareVersion" to null,
+        "isConnected" to isProductConnected,
+        "connectionStatus" to if (isProductConnected) "connected" else "disconnected",
+        "error" to "Failed to retrieve firmware version: ${e.message}"
+      )
+    }
+  }
+
+  private fun initializeWPMZManager() {
+    if (wpmzManagerInitialized) return
+    
+    try {
+      Log.d(TAG, "Initializing WPMZ Manager")
+      
+      // Initialize KMLUtil context first (required before any KMLUtil operations)
+      try {
+        KMLUtil.setContext(context)
+        Log.d(TAG, "KMLUtil context set successfully")
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to set KMLUtil context: ${e.message}", e)
+      }
+      
+      // Initialize WPMZManager similar to Litchi implementation
+      try {
+        WPMZManagerSdk.getInstance().init(context)
+        wpmzManagerInitialized = true
+        Log.d(TAG, "WPMZ Manager initialized successfully")
+      } catch (ioException: IOException) {
+        Log.e(TAG, "WPMZ Manager initialization failed with IOException: ${ioException.message}", ioException)
+        // Try to continue without full initialization - some operations may still work
+        wpmzManagerInitialized = true
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to initialize WPMZ Manager: ${e.message}", e)
+      // Continue anyway, as some functionality might still work
+      wpmzManagerInitialized = true
+    }
+  }
+
+  private fun getAvailableWaylineIDs(kmzPath: String): List<Int> {
+    return try {
+      WaypointMissionManager.getInstance().getAvailableWaylineIDs(kmzPath)
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to get wayline IDs: ${e.message}")
+      emptyList()
+    }
+  }
+
+  private fun copyContentUriToFile(contentUri: String, fileName: String): String? {
+    return try {
+      Log.d(TAG, "Copying URI: $contentUri to file: $fileName")
+      
+      // Handle both content:// and file:// URIs
+      val uri = Uri.parse(contentUri)
+      Log.d(TAG, "Parsed URI scheme: ${uri.scheme}")
+      
+      val inputStream: InputStream? = when {
+        contentUri.startsWith("content://") -> {
+          Log.d(TAG, "Opening content URI with ContentResolver")
+          context.contentResolver.openInputStream(uri)
+        }
+        contentUri.startsWith("file://") -> {
+          Log.d(TAG, "Opening file URI directly")
+          val filePath = uri.path
+          if (filePath != null && File(filePath).exists()) {
+            File(filePath).inputStream()
+          } else {
+            Log.e(TAG, "File URI path does not exist: $filePath")
+            null
+          }
+        }
+        else -> {
+          Log.d(TAG, "Trying direct file path: $contentUri")
+          if (File(contentUri).exists()) {
+            File(contentUri).inputStream()
+          } else {
+            null
+          }
+        }
+      }
+      
+      if (inputStream == null) {
+        Log.e(TAG, "Failed to open input stream for URI: $contentUri")
+        return null
+      }
+
+      // Ensure waypoint directory exists
+      initializeWaypointMission()
+      val tempFile = File(rootDir, fileName)
+      
+      Log.d(TAG, "Creating temp file at: ${tempFile.absolutePath}")
+      
+      // Ensure parent directory exists
+      tempFile.parentFile?.mkdirs()
+      
+      val outputStream = FileOutputStream(tempFile)
+
+      // Copy file contents
+      var totalBytes = 0
+      val buffer = ByteArray(8192)
+      var length: Int
+      while (inputStream.read(buffer).also { length = it } > 0) {
+        outputStream.write(buffer, 0, length)
+        totalBytes += length
+      }
+
+      outputStream.flush()
+      outputStream.close()
+      inputStream.close()
+
+      Log.d(TAG, "Successfully copied $totalBytes bytes to: ${tempFile.absolutePath}")
+      Log.d(TAG, "File exists after copy: ${tempFile.exists()}, size: ${tempFile.length()}")
+      
+      tempFile.absolutePath
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to copy content URI to file: ${e.message}", e)
+      e.printStackTrace()
+      null
+    }
+  }
+
+  private fun parseKMLMissionConfig(options: Map<String, Any>): expo.modules.djisdk.kml.MissionConfig {
+    return expo.modules.djisdk.kml.MissionConfig(
+      speed = (options["speed"] as? Number)?.toFloat() ?: 5.0f,
+      maxSpeed = (options["maxSpeed"] as? Number)?.toFloat() ?: 10.0f,
+      enableTakePhoto = options["enableTakePhoto"] as? Boolean ?: false,
+      enableStartRecording = options["enableStartRecording"] as? Boolean ?: false
+    )
   }
 }

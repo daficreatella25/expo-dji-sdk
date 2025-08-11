@@ -1,5 +1,5 @@
 import { useEvent } from 'expo';
-import ExpoDjiSdk, { testSDKClass, initializeSDK, DroneConnectionStatus, getDetailedDroneInfo, DetailedDroneInfo } from 'expo-dji-sdk';
+import ExpoDjiSdk, { testSDKClass, initializeSDK, DroneConnectionStatus, getDetailedDroneInfo, DetailedDroneInfo, getControllerInfo } from 'expo-dji-sdk';
 import { Button, SafeAreaView, ScrollView, Text, View, Alert } from 'react-native';
 import { useState, useEffect } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
@@ -8,6 +8,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import CameraScreen from './CameraScreen';
 import JoystickTest from './src/screens/JoystickTest';
+import KMLMissionScreen from './src/screens/KMLMissionScreen';
 
 const APP_KEY = '6464ccd90e7ed2835d025f4d';
 const Stack = createStackNavigator();
@@ -18,6 +19,7 @@ function HomeScreen({ navigation }: any) {
   const [droneConnectionStatus, setDroneConnectionStatus] = useState<DroneConnectionStatus | null>(null);
   const [droneInfo, setDroneInfo] = useState<any>(null);
   const [detailedDroneInfo, setDetailedDroneInfo] = useState<DetailedDroneInfo | null>(null);
+  const [controllerInfo, setControllerInfo] = useState<any>(null);
   const [initResult, setInitResult] = useState<string>('');
   const [testResult, setTestResult] = useState<string>('');
 
@@ -125,6 +127,18 @@ function HomeScreen({ navigation }: any) {
     }
   };
 
+  const getControllerInfoData = async () => {
+    try {
+      const info = await getControllerInfo();
+      setControllerInfo(info);
+      Alert.alert('Controller Info', 
+        `Firmware Version: ${info.firmwareVersion || 'Unknown'}\nConnected: ${info.isConnected ? 'Yes' : 'No'}\nStatus: ${info.connectionStatus}`
+      );
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to get controller info');
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView style={styles.container}>
@@ -217,6 +231,24 @@ function HomeScreen({ navigation }: any) {
           ) : null}
         </Group>
 
+        <Group name="Controller Information">
+          <Button
+            title="Get Controller Info"
+            onPress={getControllerInfoData}
+            disabled={!sdkInitialized || !droneConnected}
+          />
+          {controllerInfo ? (
+            <View style={styles.infoContainer}>
+              <Text style={styles.infoText}>Firmware Version: {controllerInfo.firmwareVersion || 'Unknown'}</Text>
+              <Text style={styles.infoText}>Connected: {controllerInfo.isConnected ? 'Yes' : 'No'}</Text>
+              <Text style={styles.infoText}>Status: {controllerInfo.connectionStatus}</Text>
+              {controllerInfo.error && (
+                <Text style={[styles.infoText, { color: 'red' }]}>Error: {controllerInfo.error}</Text>
+              )}
+            </View>
+          ) : null}
+        </Group>
+
         <Group name="Camera">
           <Button
             title="Open Camera (Landscape)"
@@ -225,6 +257,17 @@ function HomeScreen({ navigation }: any) {
           />
           <Text style={styles.status}>
             Note: Camera will open in landscape mode
+          </Text>
+        </Group>
+
+        <Group name="KML Missions">
+          <Button
+            title="📍 Import KML Mission"
+            onPress={() => navigation.navigate('KMLMission')}
+            disabled={!sdkInitialized}
+          />
+          <Text style={styles.status}>
+            Import and execute KML waypoint missions
           </Text>
         </Group>
 
@@ -343,6 +386,15 @@ export default function App() {
             options={{ 
               headerShown: false,
               orientation: 'landscape',
+            }}
+          />
+          <Stack.Screen 
+            name="KMLMission" 
+            component={KMLMissionScreen}
+            options={{ 
+              title: '📍 KML Mission',
+              headerStyle: { backgroundColor: '#007AFF' },
+              headerTintColor: '#fff',
             }}
           />
           <Stack.Screen 
