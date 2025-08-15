@@ -10,6 +10,7 @@ import {
 import Joystick, { JoystickValue } from './src/components/Joystick';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import ExpoDjiSdk, { 
   getAvailableCameras, 
@@ -31,31 +32,16 @@ import ExpoDjiSdk, {
   isReadyForTakeoff,
   getAltitude,
   getGPSLocation,
-  startFlyToMission,
-  stopFlyToMission,
-  getFlyToMissionInfo,
-  isWaypointMissionSupported,
-  getWaypointMissionState,
-  loadWaypointMissionFromKML,
-  generateTestWaypointMission,
-  convertKMLToKMZ,
-  validateKMZFile,
-  uploadKMZToAircraft,
-  getAvailableWaylines,
-  startWaypointMission,
-  stopWaypointMission,
-  pauseWaypointMission,
-  resumeWaypointMission,
+  // New KML Virtual Stick Mission functions
+  importAndExecuteKMLFromContent,
+  pauseKMLMission,
+  resumeKMLMission,
+  stopKMLMission,
+  KMLMissionPreview,
   FlightStatus,
   ReadinessCheck,
   AltitudeInfo,
-  GPSLocation,
-  FlyToMissionInfo,
-  WaypointMissionSupport,
-  WaypointMissionState,
-  WaypointMissionLoadResult,
-  WaypointMissionResult,
-  WaypointMissionUploadProgress
+  GPSLocation
 } from 'expo-dji-sdk';
 import { useEvent } from 'expo';
 
@@ -80,20 +66,16 @@ export default function CameraScreen() {
   const [altitudeInfo, setAltitudeInfo] = useState<AltitudeInfo | null>(null);
   const [gpsLocation, setGpsLocation] = useState<GPSLocation | null>(null);
   
-  // FlyTo Mission states
-  const [flyToMissionInfo, setFlyToMissionInfo] = useState<FlyToMissionInfo | null>(null);
-  const [isFlyToMissionActive, setIsFlyToMissionActive] = useState(false);
   const [isLandingConfirmationRequired, setIsLandingConfirmationRequired] = useState(false);
   
-  // Waypoint Mission states
-  const [waypointSupported, setWaypointSupported] = useState<boolean | null>(true); // Default to true for testing
-  const [waypointMissionState, setWaypointMissionState] = useState<string | null>(null);
-  const [waypointMissionActive, setWaypointMissionActive] = useState(false);
-  const [waypointKmlPath, setWaypointKmlPath] = useState<string>('');
-  const [waypointMissionFileName, setWaypointMissionFileName] = useState<string>('');
-  const [kmzUploadProgress, setKmzUploadProgress] = useState<number>(0);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadedKmzInfo, setUploadedKmzInfo] = useState<any>(null);
+  // KML Virtual Stick Mission states
+  const [selectedKMLFile, setSelectedKMLFile] = useState<string | null>(null);
+  const [kmlFileName, setKmlFileName] = useState<string>('');
+  const [missionPreview, setMissionPreview] = useState<KMLMissionPreview | null>(null);
+  const [kmlMissionStatus, setKmlMissionStatus] = useState<'none' | 'running' | 'paused'>('none');
+  const [kmlMissionProgress, setKmlMissionProgress] = useState<{ currentWaypoint: number; totalWaypoints: number; progress: number; distanceToTarget?: number } | null>(null);
+  const [showMissionDebugLogs, setShowMissionDebugLogs] = useState(false);
+  const [missionDebugLogs, setMissionDebugLogs] = useState<string[]>([]);
 
   // Joystick states - simplified
   const [leftJoystickActive, setLeftJoystickActive] = useState(false);
@@ -110,11 +92,31 @@ export default function CameraScreen() {
   const onLandingResult = useEvent(ExpoDjiSdk, 'onLandingResult');
   const onVirtualStickStateChange = useEvent(ExpoDjiSdk, 'onVirtualStickStateChange');
   const onFlightStatusChange = useEvent(ExpoDjiSdk, 'onFlightStatusChange');
-  const onWaypointMissionUploadProgress = useEvent(ExpoDjiSdk, 'onWaypointMissionUploadProgress');
+  
+  // Listen to KML mission events
+  const onDebugLog = useEvent(ExpoDjiSdk, 'onDebugLog');
+  const onKMLMissionEvent = useEvent(ExpoDjiSdk, 'onKMLMissionEvent');
 
   const addDebugLog = (message: string) => {
     console.log(`[CameraScreen] ${message}`);
     setDebugInfo(prev => `${new Date().toLocaleTimeString()}: ${message}\n${prev}`.slice(0, 3000));
+  };
+
+  const addMissionDebugLog = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const logEntry = `[${timestamp}] ${message}`;
+    console.log(logEntry);
+    setMissionDebugLogs(prev => [...prev.slice(-49), logEntry]); // Keep last 50 logs
+  };
+
+  const clearMissionDebugLogs = async () => {
+    try {
+      setMissionDebugLogs([]);
+      await ExpoDjiSdk.clearDebugLogs();
+      addMissionDebugLog('Mission debug logs cleared');
+    } catch (error) {
+      addMissionDebugLog('Failed to clear debug logs: ' + (error as Error).message);
+    }
   };
 
   const clearDebugLogs = () => {
@@ -201,6 +203,55 @@ export default function CameraScreen() {
     }
   }, [onFlightStatusChange]);
 
+  // Handle KML mission debug logs
+  useEffect(() => {
+    if (onDebugLog) {
+      const formattedLog = `[${new Date(onDebugLog.timestamp).toLocaleTimeString()}] ${onDebugLog.level}: ${onDebugLog.message}`;
+      setMissionDebugLogs(prev => [...prev.slice(-99), formattedLog]); // Keep last 100 logs
+    }
+  }, [onDebugLog]);
+
+  // Handle KML mission events
+  useEffect(() => {
+    if (onKMLMissionEvent) {
+      addMissionDebugLog(`Mission Event: ${onKMLMissionEvent.type}`);
+      
+      switch (onKMLMissionEvent.type) {
+        case 'missionStarted':
+          setKmlMissionStatus('running');
+          addMissionDebugLog('✅ KML Mission started');
+          Alert.alert('Mission Started', 'KML virtual stick mission has been started!');
+          break;
+        case 'missionProgress':
+          if (onKMLMissionEvent.data && 'progress' in onKMLMissionEvent.data) {
+            setKmlMissionProgress(onKMLMissionEvent.data);
+            addMissionDebugLog(`Progress: ${Math.round(onKMLMissionEvent.data.progress * 100)}%`);
+          }
+          break;
+        case 'missionCompleted':
+          setKmlMissionStatus('none');
+          setKmlMissionProgress(null);
+          addMissionDebugLog('✅ KML Mission completed successfully');
+          Alert.alert('Mission Complete', 'The KML mission has been completed successfully!');
+          break;
+        case 'missionFailed':
+          setKmlMissionStatus('none');
+          setKmlMissionProgress(null);
+          addMissionDebugLog(`❌ Mission failed: ${onKMLMissionEvent.error || 'Unknown error'}`);
+          Alert.alert('Mission Failed', `Mission failed: ${onKMLMissionEvent.error || 'Unknown error'}`);
+          break;
+        case 'missionPaused':
+          setKmlMissionStatus('paused');
+          addMissionDebugLog('⏸️ Mission paused');
+          break;
+        case 'missionResumed':
+          setKmlMissionStatus('running');
+          addMissionDebugLog('▶️ Mission resumed');
+          break;
+      }
+    }
+  }, [onKMLMissionEvent]);
+
   // Periodically check readiness when not flying, or get altitude when flying
   useEffect(() => {
     if (!isFlying) {
@@ -249,6 +300,14 @@ export default function CameraScreen() {
 
           // Initialize camera stream
           await initializeCameraStream();
+          
+          // Setup KML mission debug logging
+          try {
+            await ExpoDjiSdk.enableDebugLogging(true);
+            addMissionDebugLog('KML Mission debug logging enabled');
+          } catch (debugError) {
+            addMissionDebugLog('Failed to enable debug logging: ' + (debugError as Error).message);
+          }
           
           if (isActive) {
             setIsLoading(false);
@@ -545,6 +604,163 @@ export default function CameraScreen() {
     }, 120000);
   };
 
+  // KML Mission Functions
+  const selectKMLFile = async () => {
+    try {
+      addMissionDebugLog('Opening KML file picker...');
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['application/vnd.google-earth.kml+xml', '*/*'],
+        copyToCacheDirectory: true,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        const asset = result.assets[0];
+        setKmlFileName(asset.name);
+        
+        addMissionDebugLog(`Selected file: ${asset.name}`);
+        
+        let fileContent: string;
+        
+        if (asset.uri.startsWith('file://')) {
+          fileContent = await FileSystem.readAsStringAsync(asset.uri);
+        } else {
+          const fileName = asset.name || `kml_${Date.now()}.kml`;
+          const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+          
+          await FileSystem.copyAsync({
+            from: asset.uri,
+            to: fileUri
+          });
+          
+          fileContent = await FileSystem.readAsStringAsync(fileUri);
+        }
+        
+        addMissionDebugLog(`File content length: ${fileContent.length} characters`);
+        setSelectedKMLFile(fileContent);
+        
+        // Preview the mission
+        try {
+          const preview = await ExpoDjiSdk.previewKMLMissionFromContent(fileContent);
+          setMissionPreview(preview);
+          addMissionDebugLog(`Mission preview: ${preview.optimizedWaypoints} waypoints, valid: ${preview.isValid}`);
+          
+          if (!preview.isValid) {
+            Alert.alert('Mission Issues', `Issues found:\n${preview.issues.join('\n')}`);
+          }
+        } catch (previewError) {
+          addMissionDebugLog(`Preview error: ${(previewError as Error).message}`);
+        }
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      addMissionDebugLog(`ERROR selecting file: ${errorMessage}`);
+      Alert.alert('Error', `Failed to select KML file: ${errorMessage}`);
+    }
+  };
+
+  const startKMLMission = async () => {
+    if (!selectedKMLFile) {
+      Alert.alert('Error', 'Please select a KML file first');
+      return;
+    }
+
+    Alert.alert(
+      'Start KML Mission',
+      'This will start the virtual stick mission using advanced mode. The drone will automatically takeoff if needed.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Start Mission',
+          onPress: async () => {
+            try {
+              addMissionDebugLog('Starting KML virtual stick mission...');
+              const result = await importAndExecuteKMLFromContent(selectedKMLFile, {});
+              
+              if (result.success) {
+                setKmlMissionStatus('running');
+                addMissionDebugLog('✅ Mission started successfully');
+              } else {
+                throw new Error(result.error || 'Failed to start mission');
+              }
+            } catch (error: unknown) {
+              const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+              addMissionDebugLog(`❌ ERROR starting mission: ${errorMessage}`);
+              Alert.alert('Error', `Failed to start mission: ${errorMessage}`);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const pauseKMLMissionHandler = async () => {
+    try {
+      addMissionDebugLog('Pausing KML mission...');
+      const result = await pauseKMLMission();
+      
+      if (result.success) {
+        setKmlMissionStatus('paused');
+        addMissionDebugLog('✅ Mission paused - virtual stick disabled');
+      } else {
+        throw new Error(result.message || 'Failed to pause mission');
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      addMissionDebugLog(`❌ ERROR pausing mission: ${errorMessage}`);
+      Alert.alert('Error', `Failed to pause mission: ${errorMessage}`);
+    }
+  };
+
+  const resumeKMLMissionHandler = async () => {
+    try {
+      addMissionDebugLog('Resuming KML mission...');
+      const result = await resumeKMLMission();
+      
+      if (result.success) {
+        setKmlMissionStatus('running');
+        addMissionDebugLog('✅ Mission resumed - virtual stick re-enabled');
+      } else {
+        throw new Error(result.message || 'Failed to resume mission');
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      addMissionDebugLog(`❌ ERROR resuming mission: ${errorMessage}`);
+      Alert.alert('Error', `Failed to resume mission: ${errorMessage}`);
+    }
+  };
+
+  const stopKMLMissionHandler = async () => {
+    Alert.alert(
+      'Stop Mission',
+      'This will stop the current mission. Are you sure?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Stop Mission',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              addMissionDebugLog('Stopping KML mission...');
+              const result = await stopKMLMission();
+              
+              if (result.success) {
+                setKmlMissionStatus('none');
+                setKmlMissionProgress(null);
+                addMissionDebugLog('✅ Mission stopped');
+              } else {
+                throw new Error(result.message || 'Failed to stop mission');
+              }
+            } catch (error: unknown) {
+              const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+              addMissionDebugLog(`❌ ERROR stopping mission: ${errorMessage}`);
+              Alert.alert('Error', `Failed to stop mission: ${errorMessage}`);
+            }
+          }
+        }
+      ]
+    );
+  };
+
   // Virtual Stick Autonomous Flight - Your specific coordinates
   const TARGET_COORDINATES = {
     latitude: 112.69747710061603,
@@ -627,513 +843,6 @@ export default function CameraScreen() {
     }
   };
 
-  // Waypoint Mission Functions
-  const handleCheckWaypointSupport = async () => {
-    try {
-      addDebugLog('Checking waypoint mission support...');
-      const result = await isWaypointMissionSupported();
-      setWaypointSupported(result.isSupported);
-      
-      if (result.success) {
-        Alert.alert(
-          'Waypoint Mission Support', 
-          result.isSupported 
-            ? '✅ Waypoint missions are supported on this drone' 
-            : '❌ Waypoint missions are not supported on this drone'
-        );
-        addDebugLog(`Waypoint support: ${result.isSupported}`);
-        
-        // Also get current state if supported
-        if (result.isSupported) {
-          const stateResult = await getWaypointMissionState();
-          if (stateResult.success) {
-            setWaypointMissionState(stateResult.state);
-            addDebugLog(`Waypoint state: ${stateResult.state}`);
-          }
-        }
-      } else {
-        Alert.alert('Waypoint Check Failed', result.error || 'Unknown error');
-        addDebugLog(`Waypoint check failed: ${result.error}`);
-      }
-    } catch (error: any) {
-      addDebugLog(`Waypoint check error: ${error.message}`);
-      Alert.alert('Waypoint Error', error.message);
-    }
-  };
-
-  const handleLoadKMLFile = async () => {
-    try {
-      addDebugLog('Opening file picker for KML file...');
-      
-      const result = await DocumentPicker.getDocumentAsync({
-        type: [
-          'application/vnd.google-earth.kml+xml', // KML MIME type
-          'application/vnd.google-earth.kmz',      // KMZ MIME type
-          'application/zip',                       // KMZ is essentially a zip file
-          '*/*'                                    // Allow all files as fallback
-        ],
-        copyToCacheDirectory: true,
-        multiple: false,
-      });
-      
-      addDebugLog(`File picker result: ${JSON.stringify(result)}`);
-      
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        const selectedFile = result.assets[0];
-        const fileName = selectedFile.name;
-        const fileUri = selectedFile.uri;
-        
-        // Validate file extension
-        const isValidFile = fileName.toLowerCase().endsWith('.kml') || 
-                           fileName.toLowerCase().endsWith('.kmz');
-        
-        if (!isValidFile) {
-          Alert.alert(
-            'Invalid File Type',
-            'Please select a .kml or .kmz file for waypoint missions.\n\n' +
-            'Note: .kmz files (compressed) are preferred for better compatibility.',
-            [
-              { text: 'Try Again', onPress: handleLoadKMLFile },
-              { text: 'Cancel', style: 'cancel' }
-            ]
-          );
-          return;
-        }
-        
-        addDebugLog(`Selected KML file: ${fileName} at ${fileUri}`);
-        
-        const fileType = fileName.toLowerCase().endsWith('.kmz') ? 'KMZ' : 'KML';
-        const sizeKB = ((selectedFile.size || 0) / 1024).toFixed(1);
-        
-        Alert.alert(
-          `${fileType} Waypoint File Selected`,
-          `📁 File: ${fileName}\n📏 Size: ${sizeKB} KB\n\n` +
-          `${fileType === 'KML' ? '⚠️ KML files will be converted to KMZ format.\n\n' : ''}` +
-          'Load this waypoint mission?',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: `Load ${fileType} Mission`, onPress: () => loadWaypointKML(fileUri) }
-          ]
-        );
-      } else {
-        addDebugLog('File picker cancelled by user');
-      }
-    } catch (error: any) {
-      addDebugLog(`File picker error: ${error.message}`);
-      
-      // Fallback to manual path entry
-      Alert.alert(
-        'File Picker Error',
-        `Could not open file picker: ${error.message}\n\nWould you like to enter the file path manually?`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Enter Path',
-            onPress: () => {
-              Alert.prompt(
-                'Enter Waypoint File Path',
-                'Full path to your .kml or .kmz file:',
-                [
-                  { text: 'Cancel', style: 'cancel' },
-                  { 
-                    text: 'Load', 
-                    onPress: (path) => {
-                      if (path && path.trim()) loadWaypointKML(path.trim());
-                    }
-                  }
-                ],
-                'plain-text',
-                '/storage/emulated/0/Download/waypoints.kmz'
-              );
-            }
-          }
-        ]
-      );
-    }
-  };
-
-  const loadWaypointKML = async (filePath: string) => {
-    try {
-      addDebugLog(`Loading KML file from: ${filePath}`);
-      
-      // Show loading state
-      Alert.alert('Loading...', 'Loading waypoints from KML file...');
-      
-      const result = await loadWaypointMissionFromKML(filePath);
-      
-      if (result.success) {
-        const waypointCount = result.waypointCount || 0;
-        const message = result.message || 'KML file loaded successfully';
-        
-        const finalFilePath = result.filePath || filePath;
-        const fileName = finalFilePath.split('/').pop() || 'waypoint_mission.kmz';
-        const fileType = fileName.toLowerCase().endsWith('.kmz') ? 'KMZ' : 'KML';
-        
-        Alert.alert(
-          `${fileType} Mission Uploaded Successfully ✅`,
-          `${message}\n\n📍 Waypoints found: ${waypointCount}\n📁 File: ${fileName}\n🗏 Type: ${fileType} Mission\n\n✓ Mission uploaded to aircraft successfully!\n\nYou can now start the mission when ready to fly.`,
-          [
-            { text: 'OK', style: 'default' },
-            { 
-              text: 'Start Mission', 
-              onPress: handleStartWaypointMission,
-              style: 'default'
-            }
-          ]
-        );
-        
-        addDebugLog(`✅ Waypoint mission loaded successfully: ${waypointCount} waypoints`);
-        addDebugLog(`📁 Final file path: ${finalFilePath}`);
-        
-        setWaypointKmlPath(finalFilePath);
-        setWaypointMissionFileName(fileName);
-        
-      } else {
-        const errorMsg = result.error || result.message || 'Unknown error occurred';
-        Alert.alert(
-          'Waypoint Mission Upload Failed ❌', 
-          `Could not upload waypoints to aircraft:\n\n${errorMsg}\n\nPossible solutions:\n• Ensure the file is a valid .kmz or .kml file\n• Check file permissions and storage access\n• Verify drone is connected and ready\n• Try a different waypoint mission file\n• Restart the app if needed`,
-          [
-            { text: 'Try Another File', onPress: handleLoadKMLFile },
-            { text: 'Cancel', style: 'cancel' }
-          ]
-        );
-        addDebugLog(`❌ KML load failed: ${errorMsg}`);
-      }
-    } catch (error: any) {
-      addDebugLog(`💥 KML load error: ${error.message}`);
-      Alert.alert(
-        'Waypoint Mission Error',
-        `An error occurred while loading the waypoint file:\n\n${error.message}\n\nPlease ensure:\n• File exists and is accessible\n• App has storage permissions\n• Drone is connected and ready`,
-        [
-          { text: 'Try Again', onPress: handleLoadKMLFile },
-          { text: 'Cancel', style: 'cancel' }
-        ]
-      );
-    }
-  };
-
-  // Handle waypoint mission upload progress
-  useEffect(() => {
-    if (onWaypointMissionUploadProgress) {
-      const { progress, percentage, status } = onWaypointMissionUploadProgress;
-      setKmzUploadProgress(percentage);
-      addDebugLog(`Upload progress: ${percentage}% (${status})`);
-      
-      if (percentage === 100 && status === 'uploading') {
-        setIsUploading(false);
-        addDebugLog('KMZ upload completed successfully!');
-      }
-    }
-  }, [onWaypointMissionUploadProgress]);
-
-  // Test KML to KMZ conversion and upload (without starting mission)
-  const handleTestKMLUpload = async () => {
-    try {
-      addDebugLog('Opening file picker for KML file testing...');
-      
-      const result = await DocumentPicker.getDocumentAsync({
-        type: [
-          'application/vnd.google-earth.kml+xml',
-          'application/vnd.google-earth.kmz',
-          'application/zip',
-          '*/*'
-        ],
-        copyToCacheDirectory: true,
-        multiple: false,
-      });
-      
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        const selectedFile = result.assets[0];
-        const fileName = selectedFile.name;
-        const fileUri = selectedFile.uri;
-        
-        if (!fileName.toLowerCase().endsWith('.kml') && !fileName.toLowerCase().endsWith('.kmz')) {
-          Alert.alert('Invalid File', 'Please select a .kml or .kmz file');
-          return;
-        }
-
-        addDebugLog(`Testing file: ${fileName}`);
-        await processKMLForUpload(fileUri, fileName);
-      }
-    } catch (error: any) {
-      addDebugLog(`File picker error: ${error.message}`);
-      Alert.alert('Error', error.message);
-    }
-  };
-
-  const processKMLForUpload = async (filePath: string, fileName: string) => {
-    try {
-      const isKmz = fileName.toLowerCase().endsWith('.kmz');
-      let kmzPath = filePath;
-      
-      // Step 1: Convert KML to KMZ if needed
-      if (!isKmz) {
-        addDebugLog('Converting KML to KMZ...');
-        const conversionResult = await convertKMLToKMZ(filePath, 'RELATIVE');
-        
-        if (!conversionResult.success) {
-          Alert.alert('Conversion Failed', `Failed to convert KML to KMZ: ${conversionResult.validationErrors?.join(', ') || 'Unknown error'}`);
-          return;
-        }
-        
-        kmzPath = conversionResult.kmzPath;
-        addDebugLog(`✅ KML converted to KMZ: ${kmzPath}`);
-        addDebugLog(`Validation: ${conversionResult.isValid ? 'Valid' : 'Invalid'} (Error code: ${conversionResult.errorCode})`);
-        
-        if (!conversionResult.isValid) {
-          Alert.alert(
-            'Validation Warning', 
-            `KMZ file has validation issues:\n${conversionResult.validationErrors?.join('\n') || 'Unknown validation errors'}\n\nContinue with upload?`,
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: 'Upload Anyway', onPress: () => uploadKMZFile(kmzPath, fileName) }
-            ]
-          );
-          return;
-        }
-      } else {
-        // Step 2: Validate existing KMZ file
-        addDebugLog('Validating KMZ file...');
-        const validationResult = await validateKMZFile(kmzPath);
-        
-        addDebugLog(`Validation result: ${validationResult.isValid ? 'Valid' : 'Invalid'} (Error code: ${validationResult.errorCode})`);
-        
-        if (!validationResult.isValid) {
-          Alert.alert(
-            'Invalid KMZ File',
-            `Validation failed:\n${validationResult.errors?.join('\n') || 'Unknown errors'}\n\nWarnings:\n${validationResult.warnings?.join('\n') || 'None'}`,
-            [{ text: 'OK', style: 'cancel' }]
-          );
-          return;
-        }
-      }
-      
-      // Step 3: Upload to aircraft
-      await uploadKMZFile(kmzPath, fileName);
-      
-    } catch (error: any) {
-      addDebugLog(`❌ Process error: ${error.message}`);
-      Alert.alert('Process Error', error.message);
-    }
-  };
-
-  const uploadKMZFile = async (kmzPath: string, originalFileName: string) => {
-    try {
-      setIsUploading(true);
-      setKmzUploadProgress(0);
-      
-      addDebugLog(`🚀 Starting KMZ upload: ${kmzPath}`);
-      
-      const uploadResult = await uploadKMZToAircraft(kmzPath);
-      
-      if (uploadResult.success) {
-        setUploadedKmzInfo(uploadResult);
-        setWaypointKmlPath(kmzPath);
-        setWaypointMissionFileName(originalFileName);
-        
-        Alert.alert(
-          '✅ Upload Successful!',
-          `Mission uploaded to aircraft:\n\n` +
-          `📁 File: ${originalFileName}\n` +
-          `📍 Waylines: ${uploadResult.waylineCount || 'Unknown'}\n` +
-          `🛩️ Available Waylines: ${uploadResult.availableWaylines?.join(', ') || 'None'}\n\n` +
-          `✅ Upload completed successfully!\n` +
-          `The mission is now ready to start when drone is flying.`,
-          [
-            { text: 'OK', style: 'default' },
-            { text: 'View Waylines', onPress: () => showWaylineInfo(kmzPath) }
-          ]
-        );
-        
-        addDebugLog(`✅ Upload successful! Waylines: ${uploadResult.waylineCount}`);
-      } else {
-        Alert.alert('Upload Failed', uploadResult.error || 'Unknown upload error');
-        addDebugLog(`❌ Upload failed: ${uploadResult.error}`);
-      }
-      
-    } catch (error: any) {
-      addDebugLog(`💥 Upload error: ${error.message}`);
-      Alert.alert('Upload Error', error.message);
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  const showWaylineInfo = async (kmzPath: string) => {
-    try {
-      const waylineResult = await getAvailableWaylines(kmzPath);
-      if (waylineResult.success) {
-        Alert.alert(
-          'Wayline Information',
-          `📍 Total Waylines: ${waylineResult.count}\n` +
-          `🗏 Wayline IDs: ${waylineResult.waylineIds.join(', ')}\n\n` +
-          `Each wayline represents a flight path segment in your mission.`,
-          [{ text: 'OK' }]
-        );
-      } else {
-        Alert.alert('Error', 'Failed to get wayline information');
-      }
-    } catch (error: any) {
-      Alert.alert('Error', error.message);
-    }
-  };
-
-  const handleStartWaypointMission = async () => {
-    try {
-      if (!waypointMissionFileName) {
-        Alert.alert('Mission Required', 'Please load a waypoint mission first');
-        return;
-      }
-      
-      // Check if drone is flying for safety warning
-      if (!isFlying) {
-        Alert.alert(
-          'Start Waypoint Mission',
-          'Waypoint mission can be started, but the drone should be flying for mission execution.\n\nContinue anyway?',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Start Mission', onPress: () => executeWaypointMission() }
-          ]
-        );
-        return;
-      }
-      
-      executeWaypointMission();
-    } catch (error: any) {
-      addDebugLog(`Waypoint start error: ${error.message}`);
-      Alert.alert('Waypoint Start Error', error.message);
-    }
-  };
-  
-  const executeWaypointMission = async () => {
-    try {
-      addDebugLog(`Starting waypoint mission: ${waypointMissionFileName}...`);
-      const result = await startWaypointMission(waypointMissionFileName);
-      
-      if (result.success) {
-        setWaypointMissionActive(true);
-        Alert.alert('Waypoint Mission', 'Waypoint mission started successfully!');
-        addDebugLog('Waypoint mission started');
-      } else {
-        Alert.alert('Mission Start Failed', result.error || result.message || 'Unknown error');
-        addDebugLog(`Mission start failed: ${result.error || result.message}`);
-      }
-    } catch (error: any) {
-      addDebugLog(`Execute waypoint error: ${error.message}`);
-      Alert.alert('Waypoint Execute Error', error.message);
-    }
-  };
-
-  const handlePauseWaypointMission = async () => {
-    try {
-      addDebugLog('Pausing waypoint mission...');
-      const result = await pauseWaypointMission();
-      
-      if (result.success) {
-        Alert.alert('Waypoint Mission', 'Mission paused');
-        addDebugLog('Waypoint mission paused');
-      } else {
-        Alert.alert('Mission Pause Failed', result.error || result.message || 'Unknown error');
-        addDebugLog(`Mission pause failed: ${result.error || result.message}`);
-      }
-    } catch (error: any) {
-      addDebugLog(`Waypoint pause error: ${error.message}`);
-      Alert.alert('Waypoint Pause Error', error.message);
-    }
-  };
-
-  const handleResumeWaypointMission = async () => {
-    try {
-      addDebugLog('Resuming waypoint mission...');
-      const result = await resumeWaypointMission();
-      
-      if (result.success) {
-        Alert.alert('Waypoint Mission', 'Mission resumed');
-        addDebugLog('Waypoint mission resumed');
-      } else {
-        Alert.alert('Mission Resume Failed', result.error || result.message || 'Unknown error');
-        addDebugLog(`Mission resume failed: ${result.error || result.message}`);
-      }
-    } catch (error: any) {
-      addDebugLog(`Waypoint resume error: ${error.message}`);
-      Alert.alert('Waypoint Resume Error', error.message);
-    }
-  };
-
-  const handleStopWaypointMission = async () => {
-    try {
-      if (!waypointMissionFileName) {
-        Alert.alert('Mission Required', 'No active waypoint mission to stop');
-        return;
-      }
-      
-      addDebugLog(`Stopping waypoint mission: ${waypointMissionFileName}...`);
-      const result = await stopWaypointMission(waypointMissionFileName);
-      
-      if (result.success) {
-        setWaypointMissionActive(false);
-        Alert.alert('Waypoint Mission', 'Mission stopped');
-        addDebugLog('Waypoint mission stopped');
-      } else {
-        Alert.alert('Mission Stop Failed', result.error || result.message || 'Unknown error');
-        addDebugLog(`Mission stop failed: ${result.error || result.message}`);
-      }
-    } catch (error: any) {
-      addDebugLog(`Waypoint stop error: ${error.message}`);
-      Alert.alert('Waypoint Stop Error', error.message);
-    }
-  };
-  
-  const handleGenerateWaypoints = async () => {
-    try {
-      addDebugLog('Generating test waypoint mission...');
-      
-      // Use current GPS location if available, otherwise use default coordinates
-      const lat = gpsLocation?.isValid ? gpsLocation.latitude : undefined;
-      const lon = gpsLocation?.isValid ? gpsLocation.longitude : undefined;
-      
-      const result = await generateTestWaypointMission(lat, lon);
-      
-      if (result.success) {
-        const fileName = result.filePath?.split('/').pop() || 'generated_mission.kmz';
-        
-        Alert.alert(
-          'Waypoint Mission Generated ✨',
-          `✓ Generated test mission successfully!\n\n📍 Waypoints: ${result.waypointCount || 4}\n📁 File: ${fileName}\n🗺 Pattern: 50m x 50m square\n💪 Altitude: 20m\n\n📡 ${lat && lon ? 'Used current GPS location' : 'Used default coordinates'}\n\nReady to upload and test?`,
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { 
-              text: 'Upload & Test', 
-              onPress: () => {
-                if (result.filePath) {
-                  loadWaypointKML(result.filePath);
-                }
-              }
-            }
-          ]
-        );
-        
-        addDebugLog(`✨ Generated waypoint mission: ${result.waypointCount} waypoints`);
-        addDebugLog(`📁 File path: ${result.filePath}`);
-        
-      } else {
-        Alert.alert(
-          'Generation Failed ❌',
-          `Could not generate waypoint mission:\n\n${result.error}\n\nPlease check:\n• Drone connection\n• App permissions\n• Storage access`,
-          [{ text: 'OK', style: 'default' }]
-        );
-        addDebugLog(`❌ Generation failed: ${result.error}`);
-      }
-    } catch (error: any) {
-      addDebugLog(`💥 Generate waypoints error: ${error.message}`);
-      Alert.alert(
-        'Generation Error',
-        `An error occurred while generating waypoints:\n\n${error.message}`,
-        [{ text: 'OK', style: 'default' }]
-      );
-    }
-  };
 
   const startAutonomousFlightToTarget = () => {
     const interval = setInterval(async () => {
@@ -1434,57 +1143,98 @@ export default function CameraScreen() {
               </TouchableOpacity>
             )}
             
-            {/* Waypoint Mission Controls - Always Available */}
-            <View style={styles.waypointMissionPanel}>
+            {/* KML Virtual Stick Mission Controls */}
+            <View style={styles.kmlMissionPanel}>
               <TouchableOpacity 
-                style={[styles.flightActionButton, styles.waypointTestButton]} 
-                onPress={handleCheckWaypointSupport}
+                style={[styles.flightActionButton, styles.kmlSelectButton]} 
+                onPress={selectKMLFile}
               >
-                <Text style={styles.flightActionText}>📍 WAYPOINT</Text>
+                <Text style={styles.flightActionText}>📂 SELECT KML</Text>
               </TouchableOpacity>
               
-              {waypointSupported && (
-                <View style={styles.waypointControls}>
-                  <View style={styles.waypointFileControls}>
-                    <TouchableOpacity 
-                      style={[styles.flightActionButton, styles.waypointGenerateButton]} 
-                      onPress={handleGenerateWaypoints}
-                    >
-                      <Text style={styles.flightActionText}>✨ GENERATE</Text>
-                    </TouchableOpacity>
-                    
-                    <TouchableOpacity 
-                      style={[styles.flightActionButton, styles.waypointStartButton]} 
-                      onPress={handleLoadKMLFile}
-                    >
-                      <Text style={styles.flightActionText}>📂 SELECT KMZ</Text>
-                    </TouchableOpacity>
-                    
-                    <TouchableOpacity 
-                      style={[styles.flightActionButton, styles.waypointTestButton, { opacity: isUploading ? 0.6 : 1 }]} 
-                      onPress={handleTestKMLUpload}
-                      disabled={isUploading}
-                    >
-                      <Text style={styles.flightActionText}>
-                        {isUploading ? `🔄 ${kmzUploadProgress}%` : '🧪 TEST UPLOAD'}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
+              {selectedKMLFile && missionPreview && (
+                <View style={styles.kmlMissionInfo}>
+                  <Text style={styles.kmlMissionText}>
+                    📁 {kmlFileName} ({missionPreview.optimizedWaypoints} waypoints)
+                  </Text>
                   
-                  {waypointMissionActive && (
-                    <View style={styles.waypointActiveControls}>
+                  {kmlMissionStatus === 'none' && (
+                    <TouchableOpacity 
+                      style={[styles.flightActionButton, styles.kmlStartButton]} 
+                      onPress={startKMLMission}
+                    >
+                      <Text style={styles.flightActionText}>🚁 START MISSION</Text>
+                    </TouchableOpacity>
+                  )}
+                  
+                  {kmlMissionStatus === 'running' && (
+                    <View style={styles.kmlActiveControls}>
                       <TouchableOpacity 
-                        style={[styles.flightActionButton, styles.waypointPauseButton]} 
-                        onPress={handlePauseWaypointMission}
+                        style={[styles.flightActionButton, styles.kmlPauseButton]} 
+                        onPress={pauseKMLMissionHandler}
                       >
                         <Text style={styles.flightActionText}>⏸️ PAUSE</Text>
                       </TouchableOpacity>
                       <TouchableOpacity 
-                        style={[styles.flightActionButton, styles.waypointStopButton]} 
-                        onPress={handleStopWaypointMission}
+                        style={[styles.flightActionButton, styles.kmlStopButton]} 
+                        onPress={stopKMLMissionHandler}
                       >
                         <Text style={styles.flightActionText}>⏹️ STOP</Text>
                       </TouchableOpacity>
+                    </View>
+                  )}
+                  
+                  {kmlMissionStatus === 'paused' && (
+                    <View style={styles.kmlActiveControls}>
+                      <TouchableOpacity 
+                        style={[styles.flightActionButton, styles.kmlResumeButton]} 
+                        onPress={resumeKMLMissionHandler}
+                      >
+                        <Text style={styles.flightActionText}>▶️ RESUME</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity 
+                        style={[styles.flightActionButton, styles.kmlStopButton]} 
+                        onPress={stopKMLMissionHandler}
+                      >
+                        <Text style={styles.flightActionText}>⏹️ STOP</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  
+                  {/* Mission Progress Display */}
+                  {kmlMissionProgress && (
+                    <View style={styles.kmlProgressContainer}>
+                      <Text style={styles.kmlProgressText}>
+                        {kmlMissionProgress.distanceToTarget === -1 ? (
+                          `Waiting for GPS lock... (${Math.round(kmlMissionProgress.progress * 100)}%)`
+                        ) : (
+                          `Progress: ${kmlMissionProgress.currentWaypoint}/${kmlMissionProgress.totalWaypoints} waypoints (${Math.round(kmlMissionProgress.progress * 100)}%)`
+                        )}
+                      </Text>
+                      
+                      {kmlMissionProgress.distanceToTarget !== undefined && kmlMissionProgress.distanceToTarget !== -1 && (
+                        <Text style={styles.kmlDistanceText}>
+                          Distance to target: {kmlMissionProgress.distanceToTarget > 1000 
+                            ? `${(kmlMissionProgress.distanceToTarget / 1000).toFixed(2)} km`
+                            : `${kmlMissionProgress.distanceToTarget.toFixed(0)} m`}
+                        </Text>
+                      )}
+                      
+                      <View style={styles.kmlProgressBar}>
+                        <View style={[
+                          styles.kmlProgressFill, 
+                          { 
+                            width: `${kmlMissionProgress.progress * 100}%`,
+                            backgroundColor: kmlMissionProgress.distanceToTarget === -1 ? '#ffc107' : '#28a745'
+                          }
+                        ]} />
+                      </View>
+                      
+                      {kmlMissionProgress.distanceToTarget === -1 && (
+                        <Text style={styles.kmlGpsWaitText}>
+                          🛰️ Waiting for GPS lock
+                        </Text>
+                      )}
                     </View>
                   )}
                 </View>
@@ -1684,13 +1434,41 @@ export default function CameraScreen() {
       
       {showFullDebug && (
         <View style={styles.debugContainer}>
-          <Text style={styles.debugTitle}>Live Debug Log:</Text>
+          <View style={styles.debugTabs}>
+            <TouchableOpacity 
+              style={[styles.debugTab, !showMissionDebugLogs && styles.debugTabActive]} 
+              onPress={() => setShowMissionDebugLogs(false)}
+            >
+              <Text style={styles.debugTabText}>System Logs</Text>
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={[styles.debugTab, showMissionDebugLogs && styles.debugTabActive]} 
+              onPress={() => setShowMissionDebugLogs(true)}
+            >
+              <Text style={styles.debugTabText}>Mission Logs ({missionDebugLogs.length})</Text>
+            </TouchableOpacity>
+          </View>
+          
+          <Text style={styles.debugTitle}>
+            {showMissionDebugLogs ? 'KML Mission Debug Log:' : 'Live Debug Log:'}
+          </Text>
+          
           <ScrollView style={styles.debugScrollView}>
-            <Text style={styles.debugText}>{debugInfo}</Text>
+            <Text style={styles.debugText}>
+              {showMissionDebugLogs ? missionDebugLogs.join('\n') : debugInfo}
+            </Text>
           </ScrollView>
-          <TouchableOpacity style={styles.clearButton} onPress={clearDebugLogs}>
-            <Text style={styles.clearButtonText}>Clear Logs</Text>
-          </TouchableOpacity>
+          
+          <View style={styles.debugActions}>
+            <TouchableOpacity 
+              style={styles.clearButton} 
+              onPress={showMissionDebugLogs ? clearMissionDebugLogs : clearDebugLogs}
+            >
+              <Text style={styles.clearButtonText}>
+                Clear {showMissionDebugLogs ? 'Mission' : 'System'} Logs
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
     </View>
@@ -2222,5 +2000,140 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
     marginTop: 4,
+  },
+
+  // KML Mission Styles
+  kmlMissionPanel: {
+    alignItems: 'center',
+    marginTop: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 165, 0, 0.5)',
+  },
+  kmlSelectButton: {
+    backgroundColor: 'rgba(255, 165, 0, 0.9)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    minWidth: 120,
+    alignItems: 'center',
+  },
+  kmlMissionInfo: {
+    marginTop: 8,
+    alignItems: 'center',
+    gap: 6,
+    width: '100%',
+  },
+  kmlMissionText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  kmlStartButton: {
+    backgroundColor: 'rgba(0, 170, 0, 0.9)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    minWidth: 120,
+    alignItems: 'center',
+  },
+  kmlActiveControls: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  kmlPauseButton: {
+    backgroundColor: 'rgba(255, 140, 0, 0.9)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+    minWidth: 80,
+    alignItems: 'center',
+  },
+  kmlResumeButton: {
+    backgroundColor: 'rgba(0, 150, 200, 0.9)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+    minWidth: 80,
+    alignItems: 'center',
+  },
+  kmlStopButton: {
+    backgroundColor: 'rgba(255, 0, 0, 0.9)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+    minWidth: 80,
+    alignItems: 'center',
+  },
+  kmlProgressContainer: {
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    padding: 8,
+    borderRadius: 6,
+    marginTop: 8,
+    width: '100%',
+  },
+  kmlProgressText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  kmlDistanceText: {
+    color: '#aaa',
+    fontSize: 10,
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  kmlProgressBar: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    height: 6,
+    borderRadius: 3,
+    marginTop: 4,
+    overflow: 'hidden',
+  },
+  kmlProgressFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  kmlGpsWaitText: {
+    color: '#ffc107',
+    fontSize: 10,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+
+  // Debug Tabs Styles
+  debugTabs: {
+    flexDirection: 'row',
+    marginBottom: 10,
+  },
+  debugTab: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(100, 100, 100, 0.3)',
+    borderRadius: 4,
+    marginHorizontal: 2,
+    alignItems: 'center',
+  },
+  debugTabActive: {
+    backgroundColor: 'rgba(0, 170, 255, 0.6)',
+  },
+  debugTabText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  debugActions: {
+    alignItems: 'flex-end',
+    marginTop: 5,
   },
 });

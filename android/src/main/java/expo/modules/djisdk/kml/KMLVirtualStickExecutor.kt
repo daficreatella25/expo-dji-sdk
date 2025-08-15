@@ -444,7 +444,7 @@ class KMLVirtualStickExecutor {
         val bearing = calculateBearing(current, target)
         
         // Calculate speed based on distance (slow down when approaching)
-        val maxSpeed = 5.0 // More conservative speed for testing (5 m/s)
+        val maxSpeed = 8.0 // Higher speed for efficient mission execution (8 m/s)
         val speedFactor = if (distance > DECELERATION_DISTANCE) {
             1.0
         } else {
@@ -453,36 +453,73 @@ class KMLVirtualStickExecutor {
         val targetSpeed = maxSpeed * speedFactor
         
         // Convert bearing to velocity components
-        // Using GROUND coordinate system, where:
-        // pitch = north/south velocity (positive = north)
-        // roll = east/west velocity (positive = east)
+        // TESTING: Try different DJI coordinate system mapping
+        // Based on user feedback, original mapping causes "left and up" movement
         val bearingRad = Math.toRadians(bearing)
         val velocityNorth = targetSpeed * cos(bearingRad)
         val velocityEast = targetSpeed * sin(bearingRad)
         
-        // Apply velocity limits
-        val pitch = velocityNorth.coerceIn(-maxSpeed, maxSpeed)
-        val roll = velocityEast.coerceIn(-maxSpeed, maxSpeed)
+        // DEBUG: Check if coordinate system needs to be flipped
+        // If drone goes wrong direction, we might need to flip pitch/roll or negate values
+        sendDebugToUI("🔧 DEBUG: bearing=${bearing.format(1)}°, vN=${velocityNorth.format(2)}, vE=${velocityEast.format(2)}")
+        sendDebugToUI("📍 GPS Delta: lat=${(target.latitude - current.latitude).format(6)}, lon=${(target.longitude - current.longitude).format(6)}")
         
-        // Calculate vertical velocity with smoother control
+        // Apply velocity limits with less aggressive scaling for better performance
+        val distanceScale = if (distance < 3.0) {
+            // For very small distances, scale down moderately
+            (distance / 3.0).coerceIn(0.3, 1.0)
+        } else {
+            1.0
+        }
+        
+        // EXPERIMENTAL: Try reversing the pitch/roll mapping based on user feedback
+        // Original: pitch = velocityNorth, roll = velocityEast (caused "left and up" movement)
+        // Testing: Swap pitch/roll or negate values
+        
+        // Option 1: Swap pitch and roll
+        val pitch = (velocityEast * distanceScale).coerceIn(-maxSpeed, maxSpeed)
+        val roll = (velocityNorth * distanceScale).coerceIn(-maxSpeed, maxSpeed)
+        
+        // Option 2: Negate values (uncomment if Option 1 doesn't work)
+        // val pitch = -(velocityNorth * distanceScale).coerceIn(-maxSpeed, maxSpeed)
+        // val roll = -(velocityEast * distanceScale).coerceIn(-maxSpeed, maxSpeed)
+        
+        // Safety check: If commands are very small, set to zero to prevent jitter
+        val finalPitch = if (abs(pitch) < 0.1) 0.0 else pitch
+        val finalRoll = if (abs(roll) < 0.1) 0.0 else roll
+        
+        sendDebugToUI("🔄 EXPERIMENTAL: Swapped pitch/roll assignment")
+        
+        // Calculate vertical velocity with faster, more responsive control
         val altitudeDifference = target.altitude - current.altitude
         val verticalVelocity = when {
             abs(altitudeDifference) < ARRIVAL_THRESHOLD_VERTICAL -> 0.0
-            altitudeDifference > 3.0 -> 2.0 // Climb at 2 m/s if more than 3m below
-            altitudeDifference > 0 -> 1.0 // Climb at 1 m/s if slightly below
-            altitudeDifference < -3.0 -> -2.0 // Descend at 2 m/s if more than 3m above
-            else -> -1.0 // Descend at 1 m/s if slightly above
+            altitudeDifference > 5.0 -> 3.0 // Fast climb if more than 5m below
+            altitudeDifference > 3.0 -> 2.0 // Moderate climb if more than 3m below
+            altitudeDifference > 1.0 -> 1.0 // Normal climb if more than 1m below
+            altitudeDifference > 0 -> 0.5 // Gentle climb if slightly below
+            altitudeDifference < -5.0 -> -3.0 // Fast descent if more than 5m above
+            altitudeDifference < -3.0 -> -2.0 // Moderate descent if more than 3m above
+            altitudeDifference < -1.0 -> -1.0 // Normal descent if more than 1m above
+            else -> -0.5 // Gentle descent if slightly above
         }
+        
+        sendDebugToUI("🔺 Altitude: current=${current.altitude.format(1)}m, target=${target.altitude.format(1)}m, diff=${altitudeDifference.format(1)}m, cmd=${verticalVelocity.format(2)}m/s")
         
         // No yaw rotation for now (keeps current heading)
         val yaw = 0.0
         
-        Log.d(TAG, "Velocity calc: bearing=${bearing.format(1)}°, distance=${distance.format(1)}m, speed=${targetSpeed.format(1)}m/s")
-        Log.d(TAG, "Velocity command: pitch=${pitch.format(2)}, roll=${roll.format(2)}, yaw=$yaw, vertical=$verticalVelocity")
+        Log.d(TAG, "🧭 Position: Current lat=${current.latitude.format(6)}, lon=${current.longitude.format(6)}")
+        Log.d(TAG, "🎯 Target:   Target  lat=${target.latitude.format(6)}, lon=${target.longitude.format(6)}")
+        Log.d(TAG, "📐 Bearing: ${bearing.format(1)}°, Distance: ${distance.format(1)}m")
+        Log.d(TAG, "⚡ Velocity calc: vNorth=${velocityNorth.format(2)}, vEast=${velocityEast.format(2)}")
+        Log.d(TAG, "📊 Scale factor: distance=${distanceScale.format(2)}, speed=${speedFactor.format(2)}")
+        Log.d(TAG, "🎮 Raw command: pitch=${pitch.format(3)}, roll=${roll.format(3)}")
+        Log.d(TAG, "🎮 Final command: pitch=${finalPitch.format(3)}, roll=${finalRoll.format(3)}, yaw=$yaw, vertical=$verticalVelocity")
         
         val command = VirtualStickFlightControlParam()
-        command.pitch = pitch
-        command.roll = roll
+        command.pitch = finalPitch
+        command.roll = finalRoll
         command.yaw = yaw
         command.verticalThrottle = verticalVelocity
         command.rollPitchControlMode = RollPitchControlMode.VELOCITY

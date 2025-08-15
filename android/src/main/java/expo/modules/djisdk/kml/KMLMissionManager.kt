@@ -330,23 +330,24 @@ class KMLMissionManager {
                 return
             }
 
-            // Step 2: Optimize waypoints
-            val optimizedWaypoints = optimizer.optimizeWaypoints(kmlMission.waypoints)
-            val stats = optimizer.calculateMissionStats(optimizedWaypoints)
+            // Step 2: Use original waypoints without optimization (for testing/debugging)
+            Log.d(TAG, "Using ORIGINAL waypoints without optimization for accurate path following")
+            val originalWaypoints = kmlMission.waypoints
+            val stats = optimizer.calculateMissionStats(originalWaypoints)
             callback.onMissionPrepared(stats)
 
             // Step 3: Always use virtual stick execution for testing
-            Log.d(TAG, "Using Virtual Stick execution")
+            Log.d(TAG, "Using Virtual Stick execution with ${originalWaypoints.size} original waypoints")
             currentMissionType = MissionType.VIRTUAL_STICK
             
-            // Start virtual stick mission
-            virtualStickExecutor.startMission(optimizedWaypoints, callback)
+            // Start virtual stick mission with original waypoints
+            virtualStickExecutor.startMission(originalWaypoints, callback)
             
             promise.resolve(mapOf(
                 "success" to true,
                 "missionType" to "virtual_stick",
-                "waypoints" to optimizedWaypoints.size,
-                "message" to "Virtual stick mission started"
+                "waypoints" to originalWaypoints.size,
+                "message" to "Virtual stick mission started with original waypoints"
             ))
 
         } catch (e: Exception) {
