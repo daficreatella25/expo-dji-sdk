@@ -5,9 +5,6 @@ import android.os.Environment
 import android.content.Context
 import android.net.Uri
 import expo.modules.kotlin.Promise
-import com.dji.wpmzsdk.manager.WPMZManager
-import com.dji.wpmzsdk.common.data.HeightMode
-import com.dji.wpmzsdk.common.utils.kml.KMLUtil
 import dji.v5.manager.aircraft.waypoint3.WaypointMissionManager
 import dji.v5.utils.common.ContextUtil
 import java.io.File
@@ -29,6 +26,10 @@ class KMLMissionManager {
     private val kmlParser = KMLParser()
     private val optimizer = WaypointOptimizer()
     private val missionManager = WaypointMissionManager.getInstance()
+    private val waypointConverter = KMLToWaypointConverter()
+    private val missionCreator = DJIWaypointMissionCreator()
+    private val litchiStyleCreator = LitchiStyleMissionCreator()
+    private val virtualStickExecutor = KMLVirtualStickExecutor()
     
     private var currentMissionType: MissionType = MissionType.NONE
     private var missionCallback: KMLMissionCallback? = null
@@ -51,8 +52,9 @@ class KMLMissionManager {
         val currentWaypoint: Int,
         val totalWaypoints: Int,
         val progress: Float, // 0.0 to 1.0
-        val distanceToTarget: Float = 0f
+        val distanceToTarget: Double = 0.0
     )
+
 
     fun importAndExecuteKML(
         kmlFilePath: String,
@@ -111,37 +113,34 @@ class KMLMissionManager {
 
     private fun convertKMLToKMZ(kmlFilePath: String): String {
         return try {
+            Log.d(TAG, "[DEBUG] === Starting KML to KMZ conversion using DJI SDK v5 approach ===")
+            Log.d(TAG, "[DEBUG] Input KML file path: $kmlFilePath")
+            
             val kmlFile = File(kmlFilePath)
             if (!kmlFile.exists()) {
-                Log.e(TAG, "KML file does not exist: $kmlFilePath")
+                Log.e(TAG, "[ERROR] KML file does not exist: $kmlFilePath")
                 return ""
             }
-
-            val baseFileName = kmlFile.nameWithoutExtension
-            val outputDir = Environment.getExternalStorageDirectory().toString() + "/DJI/KMZ/"
-            val outputFile = File(outputDir)
-            if (!outputFile.exists()) {
-                outputFile.mkdirs()
+            
+            Log.d(TAG, "[DEBUG] KML file exists, size: ${kmlFile.length()} bytes")
+            
+            // Use the new Litchi-style approach
+            Log.d(TAG, "[DEBUG] Using LitchiStyleMissionCreator for conversion")
+            val kmzPath = litchiStyleCreator.createKMZFromKMLLitchiStyle(kmlFilePath)
+            
+            if (kmzPath.isEmpty()) {
+                Log.e(TAG, "[ERROR] LitchiStyleMissionCreator.createKMZFromKMLLitchiStyle returned empty path")
+                return ""
             }
             
-            val kmzPath = "$outputDir$baseFileName.kmz"
-
-            // Use WPMZManager to convert KML to KMZ
-            val success = WPMZManager.getInstance().transKMLtoKMZ(
-                kmlFilePath,
-                outputDir,
-                HeightMode.RELATIVE
-            )
-
-            if (success && File(kmzPath).exists()) {
-                Log.d(TAG, "Successfully converted KML to KMZ: $kmzPath")
-                kmzPath
-            } else {
-                Log.e(TAG, "Failed to convert KML to KMZ")
-                ""
-            }
+            Log.d(TAG, "[SUCCESS] KML to KMZ conversion completed using Litchi-style approach")
+            Log.d(TAG, "[DEBUG] Generated KMZ path: $kmzPath")
+            
+            kmzPath
+            
         } catch (e: Exception) {
-            Log.e(TAG, "Error converting KML to KMZ: ${e.message}", e)
+            Log.e(TAG, "[ERROR] Exception during KML to KMZ conversion: ${e.message}", e)
+            Log.e(TAG, "[ERROR] Exception stack trace: ${e.stackTraceToString()}")
             ""
         }
     }
@@ -152,16 +151,20 @@ class KMLMissionManager {
                 try {
                     // Use existing waypoint mission pause functionality
                     // This would integrate with the existing pauseWaypointMission method
-                    promise.resolve("Mission paused")
+                    promise.resolve(mapOf("success" to true, "message" to "WPMZ mission paused"))
                     missionCallback?.onMissionPaused()
                 } catch (e: Exception) {
                     promise.reject("PAUSE_ERROR", "Failed to pause: ${e.message}", null)
                 }
             }
             MissionType.VIRTUAL_STICK -> {
-                // Virtual stick pause would go here if implemented
-                promise.resolve("Virtual stick mission paused")
-                missionCallback?.onMissionPaused()
+                try {
+                    Log.d(TAG, "Pausing virtual stick mission")
+                    virtualStickExecutor.pauseMission()
+                    promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission paused, RC control enabled"))
+                } catch (e: Exception) {
+                    promise.reject("PAUSE_ERROR", "Failed to pause virtual stick mission: ${e.message}", null)
+                }
             }
             MissionType.NONE -> {
                 promise.reject("NO_MISSION", "No mission is currently running", null)
@@ -174,15 +177,20 @@ class KMLMissionManager {
             MissionType.WPMZ_MISSION -> {
                 try {
                     // Use existing waypoint mission resume functionality
-                    promise.resolve("Mission resumed")
+                    promise.resolve(mapOf("success" to true, "message" to "WPMZ mission resumed"))
                     missionCallback?.onMissionResumed()
                 } catch (e: Exception) {
                     promise.reject("RESUME_ERROR", "Failed to resume: ${e.message}", null)
                 }
             }
             MissionType.VIRTUAL_STICK -> {
-                promise.resolve("Virtual stick mission resumed")
-                missionCallback?.onMissionResumed()
+                try {
+                    Log.d(TAG, "Resuming virtual stick mission")
+                    virtualStickExecutor.resumeMission()
+                    promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission resumed"))
+                } catch (e: Exception) {
+                    promise.reject("RESUME_ERROR", "Failed to resume virtual stick mission: ${e.message}", null)
+                }
             }
             MissionType.NONE -> {
                 promise.reject("NO_MISSION", "No mission is currently running", null)
@@ -195,16 +203,21 @@ class KMLMissionManager {
             MissionType.WPMZ_MISSION -> {
                 try {
                     currentMissionType = MissionType.NONE
-                    promise.resolve("Mission stopped")
+                    promise.resolve(mapOf("success" to true, "message" to "WPMZ mission stopped"))
                     missionCallback?.onMissionCompleted()
                 } catch (e: Exception) {
                     promise.reject("STOP_ERROR", "Failed to stop: ${e.message}", null)
                 }
             }
             MissionType.VIRTUAL_STICK -> {
-                currentMissionType = MissionType.NONE
-                promise.resolve("Virtual stick mission stopped")
-                missionCallback?.onMissionCompleted()
+                try {
+                    Log.d(TAG, "Stopping virtual stick mission")
+                    virtualStickExecutor.stopMission()
+                    currentMissionType = MissionType.NONE
+                    promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission stopped"))
+                } catch (e: Exception) {
+                    promise.reject("STOP_ERROR", "Failed to stop virtual stick mission: ${e.message}", null)
+                }
             }
             MissionType.NONE -> {
                 promise.reject("NO_MISSION", "No mission is currently running", null)
@@ -253,7 +266,7 @@ class KMLMissionManager {
                 "altitudeRange" to stats.altitudeRange,
                 "isValid" to issues.isEmpty(),
                 "issues" to issues,
-                "supportsNativeWaypoints" to true // Always true since we convert to KMZ
+                "supportsNativeWaypoints" to false // Always use virtual stick for testing
             ))
         } catch (e: Exception) {
             Log.e(TAG, "Error previewing KML: ${e.message}", e)
@@ -290,7 +303,7 @@ class KMLMissionManager {
                 "altitudeRange" to stats.altitudeRange,
                 "isValid" to issues.isEmpty(),
                 "issues" to issues,
-                "supportsNativeWaypoints" to true // Always true since we convert to KMZ
+                "supportsNativeWaypoints" to false // Always use virtual stick for testing
             ))
         } catch (e: Exception) {
             Log.e(TAG, "Error previewing KML from content: ${e.message}", e)
@@ -322,29 +335,18 @@ class KMLMissionManager {
             val stats = optimizer.calculateMissionStats(optimizedWaypoints)
             callback.onMissionPrepared(stats)
 
-            // Step 3: Create temporary file for KMZ conversion
-            val tempFile = createTempKMLFile(kmlContent)
-            if (tempFile.isEmpty()) {
-                promise.reject("FILE_ERROR", "Failed to create temporary KML file", null)
-                return
-            }
-
-            // Step 4: Convert to KMZ
-            val kmzPath = convertKMLToKMZ(tempFile)
-            if (kmzPath.isEmpty()) {
-                promise.reject("CONVERSION_ERROR", "Failed to convert KML to KMZ format", null)
-                return
-            }
-
-            // Step 5: Use existing waypoint mission system
-            currentMissionType = MissionType.WPMZ_MISSION
-            callback.onMissionStarted(MissionType.WPMZ_MISSION)
-
+            // Step 3: Always use virtual stick execution for testing
+            Log.d(TAG, "Using Virtual Stick execution")
+            currentMissionType = MissionType.VIRTUAL_STICK
+            
+            // Start virtual stick mission
+            virtualStickExecutor.startMission(optimizedWaypoints, callback)
+            
             promise.resolve(mapOf(
                 "success" to true,
-                "missionType" to "wpmz",
+                "missionType" to "virtual_stick",
                 "waypoints" to optimizedWaypoints.size,
-                "kmzPath" to kmzPath
+                "message" to "Virtual stick mission started"
             ))
 
         } catch (e: Exception) {
@@ -355,21 +357,96 @@ class KMLMissionManager {
 
     private fun createTempKMLFile(kmlContent: String): String {
         return try {
+            Log.d(TAG, "[DEBUG] Creating temporary KML file")
             val context = ContextUtil.getContext()
+            Log.d(TAG, "[DEBUG] Got context: ${context != null}")
+            
             val tempDir = File(context.cacheDir, "kml_temp")
+            Log.d(TAG, "[DEBUG] Temp directory path: ${tempDir.absolutePath}")
+            
             if (!tempDir.exists()) {
-                tempDir.mkdirs()
+                Log.d(TAG, "[DEBUG] Creating temp directory")
+                val created = tempDir.mkdirs()
+                Log.d(TAG, "[DEBUG] Directory created: $created")
+            } else {
+                Log.d(TAG, "[DEBUG] Temp directory already exists")
             }
             
-            val tempFile = File(tempDir, "mission_${System.currentTimeMillis()}.kml")
+            val fileName = "mission_${System.currentTimeMillis()}.kml"
+            val tempFile = File(tempDir, fileName)
+            Log.d(TAG, "[DEBUG] Temp file path: ${tempFile.absolutePath}")
+            
+            Log.d(TAG, "[DEBUG] Writing KML content to file")
             tempFile.writeText(kmlContent)
             
-            Log.d(TAG, "Created temporary KML file: ${tempFile.absolutePath}")
+            val fileSize = tempFile.length()
+            Log.d(TAG, "[DEBUG] KML file written successfully, size: $fileSize bytes")
+            Log.d(TAG, "[SUCCESS] Created temporary KML file: ${tempFile.absolutePath}")
+            
             tempFile.absolutePath
             
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create temporary KML file: ${e.message}", e)
+            Log.e(TAG, "[ERROR] Failed to create temporary KML file: ${e.message}", e)
+            Log.e(TAG, "[ERROR] Exception stack trace: ${e.stackTraceToString()}")
             ""
+        }
+    }
+
+    fun convertKMLContentToKMZ(kmlContent: String, promise: Promise) {
+        try {
+            Log.d(TAG, "[DEBUG] === Starting KML Content to KMZ Conversion ===")
+            Log.d(TAG, "[DEBUG] KML content length: ${kmlContent.length} characters")
+            Log.d(TAG, "[DEBUG] KML content preview (first 200 chars): ${kmlContent.take(200)}")
+            
+            // Step 1: Create temporary KML file from content
+            Log.d(TAG, "[DEBUG] Step 1: Creating temporary KML file")
+            val tempKMLFile = createTempKMLFile(kmlContent)
+            if (tempKMLFile.isEmpty()) {
+                Log.e(TAG, "[ERROR] Failed to create temporary KML file")
+                promise.reject("FILE_ERROR", "Step 1 Failed: Could not create temporary KML file from content", null)
+                return
+            }
+            Log.d(TAG, "[DEBUG] Temporary KML file created: $tempKMLFile")
+            
+            // Step 2: Convert to KMZ using existing conversion logic
+            Log.d(TAG, "[DEBUG] Step 2: Converting temporary KML file to KMZ")
+            val kmzPath: String
+            try {
+                kmzPath = convertKMLToKMZ(tempKMLFile)
+            } catch (e: Exception) {
+                Log.e(TAG, "[ERROR] Exception in convertKMLToKMZ: ${e.message}", e)
+                promise.reject("CONVERSION_ERROR", "Step 2 Failed: Exception in convertKMLToKMZ - ${e.message}", e)
+                return
+            }
+            
+            if (kmzPath.isEmpty()) {
+                Log.e(TAG, "[ERROR] KML to KMZ conversion failed - returned empty path")
+                promise.reject("CONVERSION_ERROR", "Step 2 Failed: convertKMLToKMZ returned empty path - likely missing required DJI classes or KML format issue", null)
+                return
+            }
+            Log.d(TAG, "[DEBUG] KMZ conversion completed: $kmzPath")
+            
+            // Step 3: Clean up temporary file
+            Log.d(TAG, "[DEBUG] Step 3: Cleaning up temporary files")
+            try {
+                val deleted = File(tempKMLFile).delete()
+                Log.d(TAG, "[DEBUG] Temporary KML file deleted: $deleted")
+            } catch (e: Exception) {
+                Log.w(TAG, "[WARNING] Failed to clean up temporary file: ${e.message}")
+            }
+            
+            Log.d(TAG, "[SUCCESS] === KML to KMZ Conversion Completed Successfully ===")
+            promise.resolve(mapOf(
+                "success" to true,
+                "kmzPath" to kmzPath,
+                "message" to "KML successfully converted to KMZ format"
+            ))
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "[ERROR] Exception in convertKMLContentToKMZ: ${e.message}", e)
+            Log.e(TAG, "[ERROR] Exception stack trace: ${e.stackTraceToString()}")
+            val detailedError = "CONVERSION_ERROR: ${e.message}\nStack: ${e.stackTraceToString()}"
+            promise.reject("CONVERSION_ERROR", detailedError, e)
         }
     }
 

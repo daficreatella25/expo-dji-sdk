@@ -272,6 +272,19 @@ export type KMLMissionEvent = {
   error?: string;
 };
 
+export type DebugLogEvent = {
+  timestamp: number;
+  level: string;
+  message: string;
+  logEntry: string;
+};
+
+export type DebugLogsResponse = {
+  logs: string[];
+  count: number;
+  enabled: boolean;
+};
+
 export type ExpoDjiSdkModuleEvents = {
   onSDKRegistrationResult: (params: SDKInitializationResult) => void;
   onDroneConnectionChange: (params: DroneConnectionPayload) => void;
@@ -286,4 +299,5 @@ export type ExpoDjiSdkModuleEvents = {
   onFlightStatusChange: (params: FlightStatus) => void;
   onWaypointMissionUploadProgress: (params: WaypointMissionUploadProgress) => void;
   onKMLMissionEvent: (params: KMLMissionEvent) => void;
+  onDebugLog: (params: DebugLogEvent) => void;
 };

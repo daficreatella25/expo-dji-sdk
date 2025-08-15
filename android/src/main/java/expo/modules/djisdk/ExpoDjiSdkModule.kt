@@ -112,11 +112,16 @@ class ExpoDjiSdkModule : Module() {
   private val WAYPOINT_SAMPLE_FILE_CACHE_DIR = "waypoint/cache/"
   private val rootDir: String
     get() = DiskUtil.getExternalCacheDirPath(ContextUtil.getContext(), WAYPOINT_SAMPLE_FILE_DIR)
+  
+  // Debug logging
+  private var isDebugLoggingEnabled = false
+  private val debugLogQueue = mutableListOf<String>()
+  private val maxLogEntries = 100
 
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog")
     
     View(CameraStreamView::class) {
       Prop("cameraIndex") { view: CameraStreamView, cameraIndex: Int ->
@@ -1642,6 +1647,34 @@ class ExpoDjiSdkModule : Module() {
       }
     }
 
+    // Debug logging functions
+    AsyncFunction("enableDebugLogging") { enabled: Boolean, promise: Promise ->
+      isDebugLoggingEnabled = enabled
+      if (enabled) {
+        debugLogQueue.clear()
+        addDebugLog("DEBUG", "Debug logging enabled")
+        promise.resolve(mapOf("enabled" to true, "message" to "Debug logging enabled"))
+      } else {
+        addDebugLog("DEBUG", "Debug logging disabled")
+        promise.resolve(mapOf("enabled" to false, "message" to "Debug logging disabled"))
+      }
+    }
+    
+    AsyncFunction("getDebugLogs") { promise: Promise ->
+      promise.resolve(mapOf(
+        "logs" to debugLogQueue.toList(),
+        "count" to debugLogQueue.size,
+        "enabled" to isDebugLoggingEnabled
+      ))
+    }
+    
+    AsyncFunction("clearDebugLogs") { promise: Promise ->
+      val clearedCount = debugLogQueue.size
+      debugLogQueue.clear()
+      addDebugLog("DEBUG", "Debug logs cleared")
+      promise.resolve(mapOf("clearedCount" to clearedCount))
+    }
+
     AsyncFunction("uploadKMZToAircraft") { kmzPath: String, promise: Promise ->
       try {
         if (!isProductConnected) {
@@ -1682,46 +1715,47 @@ class ExpoDjiSdkModule : Module() {
         }
 
         // Additional diagnostics before upload
-        Log.d(TAG, "Starting KMZ upload to aircraft:")
-        Log.d(TAG, "  - File path: $actualFilePath")
-        Log.d(TAG, "  - File size: ${File(actualFilePath).length()} bytes")
-        Log.d(TAG, "  - File exists: ${File(actualFilePath).exists()}")
-        Log.d(TAG, "  - Is product connected: $isProductConnected")
-        Log.d(TAG, "  - Mission state: $currentWaypointMissionState")
-        Log.d(TAG, "  - Mission manager instance: ${WaypointMissionManager.getInstance()}")
+        addDebugLog("INFO", "Starting KMZ upload to aircraft")
+        addDebugLog("DEBUG", "File path: $actualFilePath")
+        addDebugLog("DEBUG", "File size: ${File(actualFilePath).length()} bytes")
+        addDebugLog("DEBUG", "File exists: ${File(actualFilePath).exists()}")
+        addDebugLog("DEBUG", "Is product connected: $isProductConnected")
+        addDebugLog("DEBUG", "Mission state: $currentWaypointMissionState")
+        addDebugLog("DEBUG", "Mission manager instance: ${WaypointMissionManager.getInstance()}")
         
         // Try to read the KMZ info to verify it's properly formatted
         try {
           val kmzInfo = WPMZManagerSdk.getInstance().getKMZInfo(actualFilePath)
-          Log.d(TAG, "  - KMZ info retrieved successfully")
-          Log.d(TAG, "  - Mission config: ${kmzInfo.waylineMissionConfigParseInfo}")
-          Log.d(TAG, "  - Mission info: ${kmzInfo.waylineMissionParseInfo}")
+          addDebugLog("DEBUG", "KMZ info retrieved successfully")
+          addDebugLog("DEBUG", "Mission config: ${kmzInfo.waylineMissionConfigParseInfo}")
+          addDebugLog("DEBUG", "Mission info: ${kmzInfo.waylineMissionParseInfo}")
         } catch (e: Exception) {
-          Log.e(TAG, "  - Failed to get KMZ info: ${e.message}", e)
+          addDebugLog("ERROR", "Failed to get KMZ info: ${e.message}")
         }
         
         // Check if we can read wayline IDs from the file
         try {
           val testWaylines = WaypointMissionManager.getInstance().getAvailableWaylineIDs(actualFilePath)
-          Log.d(TAG, "  - Available waylines in file: ${testWaylines.size} - IDs: $testWaylines")
+          addDebugLog("DEBUG", "Available waylines in file: ${testWaylines.size} - IDs: $testWaylines")
         } catch (e: Exception) {
-          Log.w(TAG, "  - Could not read wayline IDs from file: ${e.message}")
+          addDebugLog("WARN", "Could not read wayline IDs from file: ${e.message}")
         }
 
         WaypointMissionManager.getInstance().pushKMZFileToAircraft(
           actualFilePath,
           object : CommonCallbacks.CompletionCallbackWithProgress<Double> {
             override fun onProgressUpdate(progress: Double) {
-              Log.d(TAG, "Upload progress: ${(progress * 100).toInt()}%")
+              val percentage = (progress * 100).toInt()
+              addDebugLog("DEBUG", "Upload progress: ${percentage}%")
               sendEvent("onWaypointMissionUploadProgress", mapOf(
                 "progress" to progress,
-                "percentage" to (progress * 100).toInt(),
+                "percentage" to percentage,
                 "status" to "uploading"
               ))
             }
 
             override fun onSuccess() {
-              Log.d(TAG, "KMZ upload successful")
+              addDebugLog("INFO", "KMZ upload successful")
               try {
                 val availableWaylines = getAvailableWaylineIDs(actualFilePath)
                 promise.resolve(mapOf(
@@ -1746,18 +1780,58 @@ class ExpoDjiSdkModule : Module() {
               val errorDesc = error.description() ?: "Unknown error"
               val errorMsg = error.toString()
               
-              Log.e(TAG, "KMZ upload failed - Code: $errorCode, Description: $errorDesc, Full: $errorMsg")
+              // Log comprehensive error details using debug logging system
+              addDebugLog("ERROR", "=== KMZ UPLOAD FAILED ===")
+              addDebugLog("ERROR", "Error Code: $errorCode")
+              addDebugLog("ERROR", "Error Description: $errorDesc")
+              addDebugLog("ERROR", "Error Message: $errorMsg")
+              addDebugLog("ERROR", "Error Class: ${error.javaClass.simpleName}")
+              addDebugLog("ERROR", "File Path: $actualFilePath")
               
-              // Provide more detailed error information
+              // Try to get additional context from DJI SDK
+              try {
+                addDebugLog("ERROR", "Connection Status: ${if (isProductConnected) "Connected" else "Disconnected"}")
+                addDebugLog("ERROR", "Mission Manager State: $currentWaypointMissionState")
+                addDebugLog("ERROR", "File Size: ${if (File(actualFilePath).exists()) File(actualFilePath).length() else "File not found"} bytes")
+                addDebugLog("ERROR", "Product ID: $currentProductId")
+                
+                // Try to get product type information
+                try {
+                  val productKey = ProductKey.KeyProductType.create()
+                  val productTypeValue = productKey.get()
+                  addDebugLog("ERROR", "Product Type: $productTypeValue")
+                } catch (productError: Exception) {
+                  addDebugLog("ERROR", "Could not get product type: ${productError.message}")
+                }
+                
+              } catch (contextError: Exception) {
+                addDebugLog("ERROR", "Error getting context: ${contextError.message}")
+              }
+              addDebugLog("ERROR", "========================")
+              
+              // Provide user-friendly error messages with technical details for debugging
               val detailedError = when {
                 errorDesc.contains("not connected", ignoreCase = true) -> "Aircraft not connected or out of range"
                 errorDesc.contains("busy", ignoreCase = true) -> "Aircraft is busy, please wait and try again"
                 errorDesc.contains("format", ignoreCase = true) -> "Invalid KMZ file format"
                 errorDesc.contains("storage", ignoreCase = true) -> "Insufficient storage on aircraft"
+                errorDesc.contains("request handle not found", ignoreCase = true) -> "Internal DJI SDK error - try disconnecting and reconnecting the aircraft"
                 errorCode.contains("TIMEOUT") -> "Upload timeout - check connection to aircraft"
                 errorCode.contains("DISCONNECTED") -> "Lost connection to aircraft during upload"
-                else -> "Upload failed: $errorDesc (Code: $errorCode)"
+                else -> "Upload failed: $errorDesc"
               }
+              
+              // Create error data with technical details for debugging
+              val errorData = mapOf(
+                "userMessage" to detailedError,
+                "technicalDetails" to mapOf(
+                  "errorCode" to errorCode,
+                  "errorDescription" to errorDesc,
+                  "errorMessage" to errorMsg,
+                  "filePath" to actualFilePath,
+                  "timestamp" to System.currentTimeMillis()
+                )
+              )
               
               promise.reject("UPLOAD_FAILED", detailedError, null)
             }
@@ -1997,6 +2071,10 @@ class ExpoDjiSdkModule : Module() {
         Log.e(TAG, "Failed to get KML mission status: ${e.message}", e)
         promise.reject("STATUS_ERROR", "Failed to get mission status: ${e.message}", null)
       }
+    }
+
+    AsyncFunction("convertKMLContentToKMZ") { kmlContent: String, promise: Promise ->
+      kmlMissionManager.convertKMLContentToKMZ(kmlContent, promise)
     }
   }
 
@@ -2501,5 +2579,39 @@ class ExpoDjiSdkModule : Module() {
       enableTakePhoto = options["enableTakePhoto"] as? Boolean ?: false,
       enableStartRecording = options["enableStartRecording"] as? Boolean ?: false
     )
+  }
+  
+  // Debug logging helper functions
+  private fun addDebugLog(level: String, message: String) {
+    if (isDebugLoggingEnabled) {
+      val timestamp = System.currentTimeMillis()
+      val logEntry = "$timestamp|$level|$message"
+      
+      synchronized(debugLogQueue) {
+        debugLogQueue.add(logEntry)
+        
+        // Keep only the latest entries
+        if (debugLogQueue.size > maxLogEntries) {
+          debugLogQueue.removeAt(0)
+        }
+      }
+      
+      // Send real-time log to React Native
+      sendEvent("onDebugLog", mapOf(
+        "timestamp" to timestamp,
+        "level" to level,
+        "message" to message,
+        "logEntry" to logEntry
+      ))
+    }
+    
+    // Always write to Android log
+    when (level) {
+      "ERROR" -> Log.e(TAG, message)
+      "WARN" -> Log.w(TAG, message)
+      "INFO" -> Log.i(TAG, message)
+      "DEBUG" -> Log.d(TAG, message)
+      else -> Log.d(TAG, message)
+    }
   }
 }

@@ -71,3 +71,18 @@ export const enableCameraStream = (cameraIndex: number) => ExpoDjiSdkModule.enab
 export const disableCameraStream = (cameraIndex: number) => ExpoDjiSdkModule.disableCameraStream(cameraIndex);
 export const getCameraStreamStatus = (cameraIndex: number) => ExpoDjiSdkModule.getCameraStreamStatus(cameraIndex);
 export const getCameraStreamInfo = (cameraIndex: number) => ExpoDjiSdkModule.getCameraStreamInfo(cameraIndex);
+
+// KML Mission Management
+export const previewKMLMissionFromContent = (kmlContent: string) => ExpoDjiSdkModule.previewKMLMissionFromContent(kmlContent);
+export const convertKMLContentToKMZ = (kmlContent: string) => ExpoDjiSdkModule.convertKMLContentToKMZ(kmlContent);
+export const importAndExecuteKMLFromContent = (kmlContent: string, options?: any) => ExpoDjiSdkModule.importKMLMissionFromContent(kmlContent, options);
+export const importKMLMissionFromContent = (kmlContent: string, options?: any) => ExpoDjiSdkModule.importKMLMissionFromContent(kmlContent, options);
+export const pauseKMLMission = () => ExpoDjiSdkModule.pauseKMLMission();
+export const resumeKMLMission = () => ExpoDjiSdkModule.resumeKMLMission();
+export const stopKMLMission = () => ExpoDjiSdkModule.stopKMLMission();
+export const getKMLMissionStatus = () => ExpoDjiSdkModule.getKMLMissionStatus();
+
+// Debug Logging
+export const enableDebugLogging = (enabled: boolean) => ExpoDjiSdkModule.enableDebugLogging(enabled);
+export const getDebugLogs = () => ExpoDjiSdkModule.getDebugLogs();
+export const clearDebugLogs = () => ExpoDjiSdkModule.clearDebugLogs();
