@@ -433,6 +433,20 @@ class KMLVirtualStickExecutor {
 
         return bearing
     }
+    
+    private fun calculateBearingToPoint(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): Double {
+        val lat1Rad = Math.toRadians(fromLat)
+        val lat2Rad = Math.toRadians(toLat)
+        val deltaLonRad = Math.toRadians(toLon - fromLon)
+
+        val y = sin(deltaLonRad) * cos(lat2Rad)
+        val x = cos(lat1Rad) * sin(lat2Rad) - sin(lat1Rad) * cos(lat2Rad) * cos(deltaLonRad)
+
+        var bearing = Math.toDegrees(atan2(y, x))
+        bearing = (bearing + 360) % 360 // Normalize to 0-360 degrees
+
+        return bearing
+    }
 
     private fun calculateVelocityCommand(
         current: DronePosition, 
@@ -444,7 +458,7 @@ class KMLVirtualStickExecutor {
         val bearing = calculateBearing(current, target)
         
         // Calculate speed based on distance (slow down when approaching)
-        val maxSpeed = 8.0 // Higher speed for efficient mission execution (8 m/s)
+        val maxSpeed = 8.0 // Normal speed for efficient mission execution (8 m/s)
         val speedFactor = if (distance > DECELERATION_DISTANCE) {
             1.0
         } else {
@@ -490,7 +504,7 @@ class KMLVirtualStickExecutor {
         
         sendDebugToUI("🔄 EXPERIMENTAL: Swapped pitch/roll assignment")
         
-        // Calculate vertical velocity with faster, more responsive control
+        // Calculate vertical velocity with normal responsive control
         val altitudeDifference = target.altitude - current.altitude
         val verticalVelocity = when {
             abs(altitudeDifference) < ARRIVAL_THRESHOLD_VERTICAL -> 0.0
@@ -506,8 +520,37 @@ class KMLVirtualStickExecutor {
         
         sendDebugToUI("🔺 Altitude: current=${current.altitude.format(1)}m, target=${target.altitude.format(1)}m, diff=${altitudeDifference.format(1)}m, cmd=${verticalVelocity.format(2)}m/s")
         
-        // No yaw rotation for now (keeps current heading)
-        val yaw = 0.0
+        // POI MODE: Calculate center point of the mission path
+        // This assumes a circular/orbital path where drone should always face the center
+        val centerLat = waypoints.map { it.latitude }.average()
+        val centerLon = waypoints.map { it.longitude }.average()
+        
+        // Calculate bearing from current position to the center point (POI)
+        val bearingToPOI = calculateBearingToPoint(
+            current.latitude, current.longitude,
+            centerLat, centerLon
+        )
+        
+        // Calculate yaw adjustment to face the POI (center of path)
+        val currentHeading = current.heading.toDouble()
+        val headingDifference = (bearingToPOI - currentHeading + 360) % 360
+        
+        // Convert to -180 to 180 range for shortest rotation
+        val yawAdjustment = if (headingDifference > 180) {
+            headingDifference - 360
+        } else {
+            headingDifference
+        }
+        
+        // Apply smooth yaw rotation with max 30 deg/s
+        val yaw = when {
+            abs(yawAdjustment) < 3.0 -> 0.0 // Dead zone to prevent jitter
+            abs(yawAdjustment) > 30.0 -> yawAdjustment.coerceIn(-30.0, 30.0) // Fast rotation
+            else -> yawAdjustment * 0.5 // Slow rotation when close to target heading
+        }
+        
+        sendDebugToUI("🎯 POI Mode: current=${currentHeading.format(1)}°, POI bearing=${bearingToPOI.format(1)}°, yaw=${yaw.format(1)}°/s")
+        sendDebugToUI("📍 Center: lat=${centerLat.format(6)}, lon=${centerLon.format(6)}")
         
         Log.d(TAG, "🧭 Position: Current lat=${current.latitude.format(6)}, lon=${current.longitude.format(6)}")
         Log.d(TAG, "🎯 Target:   Target  lat=${target.latitude.format(6)}, lon=${target.longitude.format(6)}")
