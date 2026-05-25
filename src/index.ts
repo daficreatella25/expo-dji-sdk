@@ -86,3 +86,52 @@ export const getKMLMissionStatus = () => ExpoDjiSdkModule.getKMLMissionStatus();
 export const enableDebugLogging = (enabled: boolean) => ExpoDjiSdkModule.enableDebugLogging(enabled);
 export const getDebugLogs = () => ExpoDjiSdkModule.getDebugLogs();
 export const clearDebugLogs = () => ExpoDjiSdkModule.clearDebugLogs();
+
+// Photo Capture Sessions
+export type CameraMode = 'PHOTO' | 'VIDEO';
+
+export interface CaptureSession {
+  sessionId: string;
+  startedAt: number;
+  endedAt: number;
+  intervalMs: number;
+  shotCount: number;
+  downloadedCount: number;
+  totalBytes: number;
+}
+
+export interface CapturedPhoto {
+  path: string;
+  uri: string;
+  fileName: string;
+  sizeBytes: number;
+  modifiedAt: number;
+}
+
+export interface ActiveSession {
+  sessionId: string;
+  shotCount: number;
+  startedAt: number;
+  intervalMs: number;
+}
+
+export const setCameraMode = (mode: CameraMode) => ExpoDjiSdkModule.setCameraMode(mode);
+export const shootPhoto = () => ExpoDjiSdkModule.shootPhoto();
+export const startPhotoSession = (sessionId: string, intervalMs: number) =>
+  ExpoDjiSdkModule.startPhotoSession(sessionId, intervalMs);
+export const stopPhotoSession = () => ExpoDjiSdkModule.stopPhotoSession();
+export const getActivePhotoSession = (): Promise<ActiveSession | null> =>
+  ExpoDjiSdkModule.getActivePhotoSession();
+export const downloadSessionPhotos = (sessionId: string): Promise<{ downloaded: number; skipped: number }> =>
+  ExpoDjiSdkModule.downloadSessionPhotos(sessionId);
+export const listCaptureSessions = (): Promise<CaptureSession[]> =>
+  ExpoDjiSdkModule.listCaptureSessions();
+export const listCapturesInSession = (sessionId: string): Promise<CapturedPhoto[]> =>
+  ExpoDjiSdkModule.listCapturesInSession(sessionId);
+export const deleteCapture = (path: string): Promise<{ success: boolean }> =>
+  ExpoDjiSdkModule.deleteCapture(path);
+
+// Gimbal — absolute pitch in degrees. Down is negative: setGimbalPitch(-60)
+// points the camera 60° toward the ground for inspection.
+export const setGimbalPitch = (degrees: number): Promise<{ success: boolean; pitch: number }> =>
+  ExpoDjiSdkModule.setGimbalPitch(degrees);

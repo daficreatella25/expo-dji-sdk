@@ -41,7 +41,12 @@ import ExpoDjiSdk, {
   FlightStatus,
   ReadinessCheck,
   AltitudeInfo,
-  GPSLocation
+  GPSLocation,
+  // Photo capture
+  setCameraMode,
+  startPhotoSession,
+  stopPhotoSession,
+  setGimbalPitch
 } from 'expo-dji-sdk';
 import { useEvent } from 'expo';
 
@@ -77,6 +82,12 @@ export default function CameraScreen() {
   const [showMissionDebugLogs, setShowMissionDebugLogs] = useState(false);
   const [missionDebugLogs, setMissionDebugLogs] = useState<string[]>([]);
 
+  // Auto photo-capture during the mission (real DJI shutter → drone SD card).
+  const [autoCapture, setAutoCapture] = useState(true);
+  const [captureSessionId, setCaptureSessionId] = useState<string | null>(null);
+  const [captureShotCount, setCaptureShotCount] = useState(0);
+  const CAPTURE_INTERVAL_MS = 2000;
+
   // Joystick states - simplified
   const [leftJoystickActive, setLeftJoystickActive] = useState(false);
   const [rightJoystickActive, setRightJoystickActive] = useState(false);
@@ -86,6 +97,7 @@ export default function CameraScreen() {
   // Listen to camera stream status changes
   const onCameraStreamStatusChange = useEvent(ExpoDjiSdk, 'onCameraStreamStatusChange');
   const onAvailableCameraUpdated = useEvent(ExpoDjiSdk, 'onAvailableCameraUpdated');
+  const onShootPhotoResult = useEvent(ExpoDjiSdk, 'onShootPhotoResult');
   
   // Listen to flight events
   const onTakeoffResult = useEvent(ExpoDjiSdk, 'onTakeoffResult');
@@ -156,9 +168,20 @@ export default function CameraScreen() {
       setAvailableCameras(onAvailableCameraUpdated.availableCameras || []);
       if (onAvailableCameraUpdated.availableCameras && onAvailableCameraUpdated.availableCameras.length > 0) {
         setSelectedCameraIndex(onAvailableCameraUpdated.availableCameras[0].value);
+        // Camera has enumerated → the view will attach now. Reflect that in the LIVE indicator.
+        setIsStreaming(true);
+      } else {
+        setIsStreaming(false);
       }
     }
   }, [onAvailableCameraUpdated]);
+
+  // Live shot counter — fires once per shutter trigger during a capture session.
+  useEffect(() => {
+    if (onShootPhotoResult && (onShootPhotoResult as any).success) {
+      setCaptureShotCount((onShootPhotoResult as any).shotIndex);
+    }
+  }, [onShootPhotoResult]);
 
   // Handle flight events
   useEffect(() => {
@@ -231,12 +254,14 @@ export default function CameraScreen() {
         case 'missionCompleted':
           setKmlMissionStatus('none');
           setKmlMissionProgress(null);
+          endCaptureSession('mission completed');
           addMissionDebugLog('✅ KML Mission completed successfully');
-          Alert.alert('Mission Complete', 'The KML mission has been completed successfully!');
+          Alert.alert('Mission Complete', 'The KML mission completed! Pull captured photos from the Gallery after landing.');
           break;
         case 'missionFailed':
           setKmlMissionStatus('none');
           setKmlMissionProgress(null);
+          endCaptureSession('mission failed');
           addMissionDebugLog(`❌ Mission failed: ${onKMLMissionEvent.error || 'Unknown error'}`);
           Alert.alert('Mission Failed', `Mission failed: ${onKMLMissionEvent.error || 'Unknown error'}`);
           break;
@@ -658,6 +683,41 @@ export default function CameraScreen() {
     }
   };
 
+  // Auto-capture tied to a mission run. Photos go to the drone SD card; pull
+  // them to the phone from the Gallery afterwards.
+  const beginCaptureSession = async () => {
+    if (!autoCapture) return;
+    const sessionId = `mission-${Date.now()}`;
+    try {
+      await setCameraMode('PHOTO');
+      // Point the camera 60° down for rooftop/area inspection before capturing.
+      try {
+        await setGimbalPitch(-60);
+        addMissionDebugLog('🎥 Gimbal set to 60° down');
+      } catch (g: any) {
+        addMissionDebugLog(`⚠️ Gimbal tilt failed: ${g?.message ?? g}`);
+      }
+      await startPhotoSession(sessionId, CAPTURE_INTERVAL_MS);
+      setCaptureSessionId(sessionId);
+      setCaptureShotCount(0);
+      addMissionDebugLog(`📸 Auto-capture started (${CAPTURE_INTERVAL_MS}ms) → ${sessionId}`);
+    } catch (e: any) {
+      addMissionDebugLog(`⚠️ Auto-capture failed to start: ${e?.message ?? e}`);
+    }
+  };
+
+  const endCaptureSession = async (reason: string) => {
+    if (!captureSessionId) return;
+    try {
+      const res = await stopPhotoSession();
+      addMissionDebugLog(`📸 Auto-capture stopped (${reason}) — ${res?.shotCount ?? '?'} shots`);
+    } catch (e: any) {
+      addMissionDebugLog(`⚠️ Failed to stop capture: ${e?.message ?? e}`);
+    } finally {
+      setCaptureSessionId(null);
+    }
+  };
+
   const startKMLMission = async () => {
     if (!selectedKMLFile) {
       Alert.alert('Error', 'Please select a KML file first');
@@ -675,10 +735,11 @@ export default function CameraScreen() {
             try {
               addMissionDebugLog('Starting KML virtual stick mission...');
               const result = await importAndExecuteKMLFromContent(selectedKMLFile, {});
-              
+
               if (result.success) {
                 setKmlMissionStatus('running');
                 addMissionDebugLog('✅ Mission started successfully');
+                beginCaptureSession();
               } else {
                 throw new Error(result.error || 'Failed to start mission');
               }
@@ -741,8 +802,9 @@ export default function CameraScreen() {
           onPress: async () => {
             try {
               addMissionDebugLog('Stopping KML mission...');
+              await endCaptureSession('mission stopped');
               const result = await stopKMLMission();
-              
+
               if (result.success) {
                 setKmlMissionStatus('none');
                 setKmlMissionProgress(null);
@@ -1094,8 +1156,8 @@ export default function CameraScreen() {
         <CameraStreamView
           style={styles.cameraStreamView}
           cameraIndex={selectedCameraIndex}
-          streamEnabled={isStreaming}
-          scaleType={0} // CENTER_INSIDE
+          streamEnabled={true} // always request; the native view waits for the camera to enumerate before attaching, so this removes the on/off race that made the feed intermittent
+          scaleType={1} // 0=FIX_XY(stretch) 1=CENTER_CROP(fill,no distortion) 2=CENTER_INSIDE(letterbox)
         />
         
         {/* Top-Left Flight Controls - Moved higher to avoid navigation bar */}
@@ -1274,7 +1336,19 @@ export default function CameraScreen() {
           <Text style={styles.statusBadge}>
             {isStreaming ? '🟢 LIVE' : '🔴 OFF'}
           </Text>
-          
+
+          {/* Capture indicator — shows a blinking dot + running shot count while a session is active */}
+          {captureSessionId && (
+            <View style={styles.captureBadge}>
+              <Text style={styles.captureBadgeText}>📸 {captureShotCount}</Text>
+            </View>
+          )}
+
+          {/* Gallery shortcut — always reachable from the flight screen */}
+          <TouchableOpacity style={styles.galleryBadge} onPress={() => (navigation as any).navigate('Gallery')}>
+            <Text style={styles.galleryBadgeText}>🖼 Gallery</Text>
+          </TouchableOpacity>
+
           {availableCameras.length > 0 && (
             <Text style={styles.cameraBadge}>
               CAM {selectedCameraIndex}
@@ -1601,6 +1675,22 @@ const styles = StyleSheet.create({
     marginBottom: 3,
     overflow: 'hidden',
   },
+  captureBadge: {
+    backgroundColor: 'rgba(64,222,172,0.95)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    marginBottom: 3,
+  },
+  captureBadgeText: { color: '#0F1729', fontSize: 12, fontWeight: '700' },
+  galleryBadge: {
+    backgroundColor: 'rgba(163,214,244,0.95)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    marginBottom: 3,
+  },
+  galleryBadgeText: { color: '#0F1729', fontSize: 11, fontWeight: '700' },
   infoBadge: {
     backgroundColor: 'rgba(100,100,100,0.8)',
     color: '#fff',

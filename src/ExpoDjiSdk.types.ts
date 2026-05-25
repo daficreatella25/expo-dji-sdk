@@ -167,6 +167,7 @@ export type FlyToTarget = {
 
 export type FlyToMissionInfo = {
   isRunning: boolean;
+  flyToMode: string;
   currentSpeed: number;
   targetLocation?: {
     latitude: number;
@@ -186,6 +187,9 @@ export type FlyToResult = {
 export type WaypointMissionSupport = {
   isSupported: boolean;
   success: boolean;
+  state?: string;
+  sdkRegistered?: boolean;
+  productConnected?: boolean;
   error?: string;
 };
 
@@ -300,4 +304,17 @@ export type ExpoDjiSdkModuleEvents = {
   onWaypointMissionUploadProgress: (params: WaypointMissionUploadProgress) => void;
   onKMLMissionEvent: (params: KMLMissionEvent) => void;
   onDebugLog: (params: DebugLogEvent) => void;
+  onShootPhotoResult: (params: {
+    sessionId: string;
+    shotIndex: number;
+    success: boolean;
+    error: string;
+  }) => void;
+  onPhotoDownloadProgress: (params: {
+    sessionId: string;
+    fileName: string;
+    downloaded: number;
+    total: number;
+    finished: boolean;
+  }) => void;
 };
