@@ -1,124 +1,167 @@
 package expo.modules.djisdk
 
 import android.content.Context
+import android.graphics.SurfaceTexture
 import android.util.Log
 import android.view.Surface
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.TextureView
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.views.ExpoView
 
+/**
+ * Renders the DJI camera stream into a TextureView.
+ *
+ * Why TextureView and not SurfaceView: SurfaceView punches a separate native
+ * window *behind* the app's view hierarchy. Inside React Native — which heavily
+ * re-renders and which we force into a landscape orientation on this screen —
+ * that separate surface gets created and destroyed rapidly during rotation/
+ * re-layout (observed in logcat: surface attached then "Surface destroyed" 0.2s
+ * later), so the feed never stabilizes. TextureView renders inside the normal
+ * view tree, survives RN re-renders and orientation changes, and gives us a
+ * Surface (via its SurfaceTexture) we hand to putCameraStreamSurface.
+ *
+ * Surface attach is gated on camera availability (pushed from the module's
+ * AvailableCameraUpdatedListener) so we never attach before MSDK has enumerated
+ * the camera.
+ */
 class CameraStreamView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   companion object {
     private const val TAG = "CameraStreamView"
   }
 
-  private val surfaceView: SurfaceView
+  private val textureView: TextureView
   private val cameraStreamManager: ICameraStreamManager = MediaDataCenter.getInstance().cameraStreamManager
   private var currentCameraIndex: ComponentIndexType = ComponentIndexType.LEFT_OR_MAIN
   private var isStreamEnabled = false
   private var scaleType: ICameraStreamManager.ScaleType = ICameraStreamManager.ScaleType.CENTER_INSIDE
+  private var availableCameras: List<ComponentIndexType> = emptyList()
+  private var surface: Surface? = null
+  private var attached = false
 
   init {
-    surfaceView = SurfaceView(context)
-    
-    surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-      override fun surfaceCreated(holder: SurfaceHolder) {
-        Log.d(TAG, "Surface created")
+    textureView = TextureView(context)
+    textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+      override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
+        Log.d(TAG, "SurfaceTexture available ${width}x${height}")
+        surface = Surface(st)
+        tryAttachSurface()
       }
 
-      override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        Log.d(TAG, "Surface changed - width: $width, height: $height")
-        if (isStreamEnabled) {
-          putCameraStreamSurface(holder.surface, width, height)
-        }
+      override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
+        Log.d(TAG, "SurfaceTexture resized ${width}x${height}")
+        // Re-attach so the stream matches the new (e.g. post-rotation) size.
+        tryAttachSurface()
       }
 
-      override fun surfaceDestroyed(holder: SurfaceHolder) {
-        Log.d(TAG, "Surface destroyed")
-        removeCameraStreamSurface(holder.surface)
+      override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+        Log.d(TAG, "SurfaceTexture destroyed")
+        detachSurface()
+        surface?.release()
+        surface = null
+        return true
       }
-    })
 
-    addView(surfaceView)
+      override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+    }
+    addView(textureView)
+  }
+
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    ExpoDjiSdkModule.registerStreamView(this)
+  }
+
+  override fun onDetachedFromWindow() {
+    ExpoDjiSdkModule.unregisterStreamView(this)
+    detachSurface()
+    super.onDetachedFromWindow()
+  }
+
+  fun onAvailableCamerasUpdated(list: List<ComponentIndexType>) {
+    val changed = list != availableCameras
+    availableCameras = list
+    if (changed) {
+      Log.d(TAG, "availableCameras → ${list.joinToString { it.name }}; retry attach")
+      tryAttachSurface()
+    }
   }
 
   fun setCameraIndex(cameraIndex: Int) {
     val newComponentIndex = ComponentIndexType.find(cameraIndex)
     if (newComponentIndex != currentCameraIndex) {
-      Log.d(TAG, "Setting camera index to: $cameraIndex ($newComponentIndex)")
-      
-      // Remove current surface first
-      removeCameraStreamSurface(surfaceView.holder.surface)
-      
-      // Update camera index
+      Log.d(TAG, "setCameraIndex → $newComponentIndex")
+      detachSurface()
       currentCameraIndex = newComponentIndex
-      
-      // Re-add surface if stream is enabled
-      if (isStreamEnabled && surfaceView.width > 0 && surfaceView.height > 0) {
-        putCameraStreamSurface(surfaceView.holder.surface, surfaceView.width, surfaceView.height)
-      }
+      tryAttachSurface()
     }
   }
 
   fun setStreamEnabled(enabled: Boolean) {
-    Log.d(TAG, "Setting stream enabled: $enabled")
+    if (enabled == isStreamEnabled) return
+    Log.d(TAG, "setStreamEnabled → $enabled")
     isStreamEnabled = enabled
-    
-    if (enabled && surfaceView.width > 0 && surfaceView.height > 0) {
-      putCameraStreamSurface(surfaceView.holder.surface, surfaceView.width, surfaceView.height)
-    } else {
-      removeCameraStreamSurface(surfaceView.holder.surface)
-    }
+    if (enabled) tryAttachSurface() else detachSurface()
   }
 
   fun setScaleType(scaleTypeValue: Int) {
-    val newScaleType = ICameraStreamManager.ScaleType.find(scaleTypeValue) 
+    val newScaleType = ICameraStreamManager.ScaleType.find(scaleTypeValue)
       ?: ICameraStreamManager.ScaleType.CENTER_INSIDE
-    
     if (newScaleType != scaleType) {
-      Log.d(TAG, "Setting scale type to: $newScaleType")
+      Log.d(TAG, "setScaleType → $newScaleType")
       scaleType = newScaleType
-      
-      // Re-add surface with new scale type
-      if (isStreamEnabled && surfaceView.width > 0 && surfaceView.height > 0) {
-        removeCameraStreamSurface(surfaceView.holder.surface)
-        putCameraStreamSurface(surfaceView.holder.surface, surfaceView.width, surfaceView.height)
-      }
+      if (isStreamEnabled) tryAttachSurface()
     }
   }
 
-  private fun putCameraStreamSurface(surface: Surface, width: Int, height: Int) {
+  /**
+   * Attach the texture's surface to the DJI stream manager only when ALL of:
+   *  - stream is enabled (consumer asked for it)
+   *  - the SurfaceTexture exists and the view is sized
+   *  - the target camera is in the available list (DJI pipeline ready)
+   */
+  private fun tryAttachSurface() {
+    if (!isStreamEnabled) return
+    if (currentCameraIndex == ComponentIndexType.UNKNOWN) return
+    if (currentCameraIndex !in availableCameras) {
+      Log.d(TAG, "tryAttachSurface: waiting for $currentCameraIndex (available=${availableCameras.joinToString { it.name }})")
+      return
+    }
+    val s = surface
+    if (s == null || !s.isValid || textureView.width <= 0 || textureView.height <= 0) {
+      Log.d(TAG, "tryAttachSurface: surface/texture not ready")
+      return
+    }
     try {
-      Log.d(TAG, "Putting camera stream surface - camera: $currentCameraIndex, size: ${width}x${height}, scale: $scaleType")
+      Log.d(TAG, "putCameraStreamSurface($currentCameraIndex, ${textureView.width}x${textureView.height}, $scaleType)")
       cameraStreamManager.putCameraStreamSurface(
         currentCameraIndex,
-        surface,
-        width,
-        height,
+        s,
+        textureView.width,
+        textureView.height,
         scaleType
       )
+      attached = true
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to put camera stream surface: ${e.message}", e)
+      Log.e(TAG, "putCameraStreamSurface failed: ${e.message}", e)
     }
   }
 
-  private fun removeCameraStreamSurface(surface: Surface) {
+  private fun detachSurface() {
+    if (!attached) return
+    val s = surface ?: return
     try {
-      Log.d(TAG, "Removing camera stream surface")
-      cameraStreamManager.removeCameraStreamSurface(surface)
+      cameraStreamManager.removeCameraStreamSurface(s)
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to remove camera stream surface: ${e.message}", e)
+      Log.e(TAG, "removeCameraStreamSurface failed: ${e.message}", e)
     }
+    attached = false
   }
 
   override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
     super.onLayout(changed, left, top, right, bottom)
-    
-    // Make sure SurfaceView fills the entire view
-    surfaceView.layout(0, 0, right - left, bottom - top)
+    textureView.layout(0, 0, right - left, bottom - top)
   }
 }

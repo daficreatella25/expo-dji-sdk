@@ -9,6 +9,8 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import CameraScreen from './CameraScreen';
 import JoystickTest from './src/screens/JoystickTest';
 import KMLMissionScreen from './src/screens/KMLMissionScreen';
+import PhotoCaptureScreen from './src/screens/PhotoCaptureScreen';
+import GalleryScreen from './src/screens/GalleryScreen';
 
 const APP_KEY = '6464ccd90e7ed2835d025f4d';
 const Stack = createStackNavigator();
@@ -271,6 +273,21 @@ function HomeScreen({ navigation }: any) {
           </Text>
         </Group>
 
+        <Group name="Photo Capture">
+          <Button
+            title="📸 Photo Sessions"
+            onPress={() => navigation.navigate('PhotoCapture')}
+            disabled={!sdkInitialized}
+          />
+          <Button
+            title="🖼 Gallery"
+            onPress={() => navigation.navigate('Gallery')}
+          />
+          <Text style={styles.status}>
+            Periodic auto-capture during flight + bulk download afterwards
+          </Text>
+        </Group>
+
         <Group name="Testing">
           <Button
             title="🕹️ Test Joysticks"
@@ -388,12 +405,30 @@ export default function App() {
               orientation: 'landscape',
             }}
           />
-          <Stack.Screen 
-            name="KMLMission" 
+          <Stack.Screen
+            name="KMLMission"
             component={KMLMissionScreen}
-            options={{ 
+            options={{
               title: '📍 KML Mission',
               headerStyle: { backgroundColor: '#007AFF' },
+              headerTintColor: '#fff',
+            }}
+          />
+          <Stack.Screen
+            name="PhotoCapture"
+            component={PhotoCaptureScreen}
+            options={{
+              title: '📸 Photo Capture',
+              headerStyle: { backgroundColor: '#0F1729' },
+              headerTintColor: '#fff',
+            }}
+          />
+          <Stack.Screen
+            name="Gallery"
+            component={GalleryScreen}
+            options={{
+              title: '🖼 Gallery',
+              headerStyle: { backgroundColor: '#0F1729' },
               headerTintColor: '#fff',
             }}
           />

@@ -167,6 +167,7 @@ export type FlyToTarget = {
 
 export type FlyToMissionInfo = {
   isRunning: boolean;
+  flyToMode: string;
   currentSpeed: number;
   targetLocation?: {
     latitude: number;
@@ -186,6 +187,9 @@ export type FlyToResult = {
 export type WaypointMissionSupport = {
   isSupported: boolean;
   success: boolean;
+  state?: string;
+  sdkRegistered?: boolean;
+  productConnected?: boolean;
   error?: string;
 };
 
