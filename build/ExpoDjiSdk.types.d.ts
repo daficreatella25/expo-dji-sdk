@@ -263,5 +263,18 @@ export type ExpoDjiSdkModuleEvents = {
     onWaypointMissionUploadProgress: (params: WaypointMissionUploadProgress) => void;
     onKMLMissionEvent: (params: KMLMissionEvent) => void;
     onDebugLog: (params: DebugLogEvent) => void;
+    onShootPhotoResult: (params: {
+        sessionId: string;
+        shotIndex: number;
+        success: boolean;
+        error: string;
+    }) => void;
+    onPhotoDownloadProgress: (params: {
+        sessionId: string;
+        fileName: string;
+        downloaded: number;
+        total: number;
+        finished: boolean;
+    }) => void;
 };
 //# sourceMappingURL=ExpoDjiSdk.types.d.ts.map
