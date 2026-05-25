@@ -1,0 +1,1 @@
+{"version":3,"file":"CameraStreamView.d.ts","sourceRoot":"","sources":["../src/CameraStreamView.tsx"],"names":[],"mappings":"AACA,OAAO,KAAK,KAAK,MAAM,OAAO,CAAC;AAE/B,MAAM,WAAW,qBAAqB;IACpC,WAAW,EAAE,MAAM,CAAC;IACpB,aAAa,EAAE,OAAO,CAAC;IACvB,SAAS,CAAC,EAAE,MAAM,CAAC;IACnB,KAAK,CAAC,EAAE,GAAG,CAAC;CACb;AAKD,MAAM,CAAC,OAAO,UAAU,gBAAgB,CAAC,KAAK,EAAE,qBAAqB,qBAEpE"}
