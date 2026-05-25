@@ -17,6 +17,11 @@ import dji.sdk.keyvalue.value.flightcontroller.YawControlMode
 import dji.sdk.keyvalue.value.flightcontroller.VerticalControlMode
 import dji.sdk.keyvalue.value.flightcontroller.FlightCoordinateSystem
 import dji.sdk.keyvalue.value.common.EmptyMsg
+import dji.sdk.keyvalue.value.camera.CameraMode
+import dji.sdk.keyvalue.key.GimbalKey
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
+import dji.v5.manager.KeyManager
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
 import dji.sdk.keyvalue.value.common.ComponentIndexType
@@ -28,6 +33,7 @@ import dji.v5.et.create
 import dji.v5.et.get
 import dji.v5.et.action
 import dji.v5.manager.intelligent.IntelligentFlightManager
+import dji.v5.manager.intelligent.IMissionInfoListener
 import dji.v5.manager.intelligent.flyto.FlyToTarget
 import dji.v5.manager.intelligent.flyto.FlyToInfo
 import dji.sdk.keyvalue.value.flightcontroller.FlyToMode
@@ -88,6 +94,48 @@ import expo.modules.djisdk.kml.MissionConfig as KMLMissionConfig
 class ExpoDjiSdkModule : Module() {
   companion object {
     private const val TAG = "ExpoDjiSdk"
+
+    // Set to true to force every native-WPMZ waypoint AsyncFunction to short-circuit
+    // and report waypoint support as false. KML missions still run via the
+    // virtual-stick executor in KMLMissionManager. Flip to false once a
+    // waypoint-capable drone is available for testing.
+    private const val FORCE_VIRTUAL_STICK_ONLY = true
+
+    // Camera-stream view registry — views call back to retry surface attach
+    // whenever the camera availability list changes. Without this,
+    // putCameraStreamSurface gets called once on surfaceChanged before the
+    // camera has enumerated and never retried, causing the ~60s "black screen
+    // then video" delay on cold start. See Mobile-SDK-Android-V5/LiveFragment
+    // — the official sample re-triggers putCameraStreamSurface inside the
+    // availableCameraList observer.
+    @Volatile var cachedAvailableCameras: List<ComponentIndexType> = emptyList()
+      private set
+    private val streamViews = java.util.Collections.newSetFromMap(
+      java.util.concurrent.ConcurrentHashMap<CameraStreamView, Boolean>()
+    )
+    fun registerStreamView(view: CameraStreamView) {
+      streamViews.add(view)
+      view.onAvailableCamerasUpdated(cachedAvailableCameras)
+    }
+    fun unregisterStreamView(view: CameraStreamView) {
+      streamViews.remove(view)
+    }
+    fun updateAvailableCameras(list: List<ComponentIndexType>) {
+      cachedAvailableCameras = list
+      streamViews.forEach { it.onAvailableCamerasUpdated(list) }
+    }
+  }
+
+  private fun rejectIfWaypointDisabled(promise: Promise): Boolean {
+    if (FORCE_VIRTUAL_STICK_ONLY) {
+      promise.reject(
+        "WAYPOINT_UNSUPPORTED",
+        "Native waypoint missions are disabled (FORCE_VIRTUAL_STICK_ONLY). Use importKMLMissionFromContent for virtual-stick execution.",
+        null
+      )
+      return true
+    }
+    return false
   }
   
   private val context: Context
@@ -99,13 +147,42 @@ class ExpoDjiSdkModule : Module() {
   private val kmlMissionManager = KMLMissionManager()
   
   // Camera stream management
-  private val cameraStreamManager: ICameraStreamManager 
+  private val cameraStreamManager: ICameraStreamManager
     get() = MediaDataCenter.getInstance().cameraStreamManager
   private var availableCameraListener: ICameraStreamManager.AvailableCameraUpdatedListener? = null
   private var currentCameraSurfaces = mutableMapOf<Int, Surface>()
+
+  // Photo-capture session manager (timer + post-flight bulk download)
+  private val photoManager: PhotoCaptureManager by lazy {
+    PhotoCaptureManager(ContextUtil.getContext()).apply {
+      onShootResult = { sessionId, shotIndex, success, error ->
+        sendEvent("onShootPhotoResult", mapOf(
+          "sessionId" to sessionId,
+          "shotIndex" to shotIndex,
+          "success" to success,
+          "error" to (error ?: "")
+        ))
+      }
+      onDownloadProgress = { sessionId, fileName, downloaded, total, finished ->
+        sendEvent("onPhotoDownloadProgress", mapOf(
+          "sessionId" to sessionId,
+          "fileName" to fileName,
+          "downloaded" to downloaded,
+          "total" to total,
+          "finished" to finished
+        ))
+      }
+    }
+  }
+
   
   // Waypoint mission state tracking
   private var currentWaypointMissionState: WaypointMissionExecuteState? = null
+
+  // FlyTo mission state cache (populated by IMissionInfoListener)
+  private var currentFlyToInfo: FlyToInfo? = null
+  private var currentFlyToTarget: FlyToTarget? = null
+  private var flyToInfoListener: IMissionInfoListener<FlyToInfo, FlyToTarget>? = null
   private var waypointDirectoryInitialized = false
   private var wpmzManagerInitialized = false
   private val WAYPOINT_SAMPLE_FILE_DIR = "waypoint/"
@@ -121,7 +198,44 @@ class ExpoDjiSdkModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress")
+
+    OnDestroy {
+      try {
+        VirtualStickManager.getInstance().clearAllVirtualStickStateListener()
+      } catch (e: Throwable) {
+        Log.w(TAG, "OnDestroy: clearAllVirtualStickStateListener failed: ${e.message}")
+      }
+      try {
+        WaypointMissionManager.getInstance().clearAllWaypointMissionExecuteStateListener()
+      } catch (e: Throwable) {
+        Log.w(TAG, "OnDestroy: clearAllWaypointMissionExecuteStateListener failed: ${e.message}")
+      }
+      try {
+        availableCameraListener?.let { cameraStreamManager.removeAvailableCameraUpdatedListener(it) }
+      } catch (e: Throwable) {
+        Log.w(TAG, "OnDestroy: removeAvailableCameraUpdatedListener failed: ${e.message}")
+      }
+      availableCameraListener = null
+      // Reset the cached availability so freshly-mounted views don't trust a
+      // stale list from a prior module instance.
+      updateAvailableCameras(emptyList())
+      try {
+        photoManager.release()
+      } catch (e: Throwable) {
+        Log.w(TAG, "OnDestroy: photoManager.release failed: ${e.message}")
+      }
+      try {
+        flyToInfoListener?.let {
+          IntelligentFlightManager.getInstance().flyToMissionManager.removeMissionInfoListener(it)
+        }
+      } catch (e: Throwable) {
+        Log.w(TAG, "OnDestroy: removeMissionInfoListener (FlyTo) failed: ${e.message}")
+      }
+      flyToInfoListener = null
+      currentFlyToInfo = null
+      currentFlyToTarget = null
+    }
     
     View(CameraStreamView::class) {
       Prop("cameraIndex") { view: CameraStreamView, cameraIndex: Int ->
@@ -191,6 +305,7 @@ class ExpoDjiSdkModule : Module() {
             
             setupVirtualStickListener()
             setupCameraStreamListener()
+            setupFlyToMissionListener()
             getDroneBasicInfo()
           }
 
@@ -524,7 +639,7 @@ class ExpoDjiSdkModule : Module() {
 
         val componentIndex = ComponentIndexType.find(cameraIndex)
         val streamInfo = getCameraStreamInfoMap(componentIndex)
-        
+
         if (streamInfo != null) {
           promise.resolve(streamInfo)
         } else {
@@ -532,6 +647,143 @@ class ExpoDjiSdkModule : Module() {
         }
       } catch (e: Exception) {
         promise.reject("CAMERA_INFO_ERROR", "Failed to get camera stream info: ${e.message}", e)
+      }
+    }
+
+    // ---------- Photo capture session API ----------
+
+    AsyncFunction("setCameraMode") { mode: String, promise: Promise ->
+      if (!isProductConnected) { promise.reject("NOT_CONNECTED", "No drone connected", null); return@AsyncFunction }
+      val cameraMode = when (mode.uppercase()) {
+        "PHOTO", "PHOTO_NORMAL" -> CameraMode.PHOTO_NORMAL
+        "VIDEO", "VIDEO_NORMAL" -> CameraMode.VIDEO_NORMAL
+        else -> { promise.reject("BAD_MODE", "Unknown camera mode: $mode (use PHOTO or VIDEO)", null); return@AsyncFunction }
+      }
+      photoManager.setCameraMode(cameraMode) { ok, err ->
+        if (ok) promise.resolve(mapOf("success" to true))
+        else promise.reject("SET_MODE_FAILED", err ?: "unknown error", null)
+      }
+    }
+
+    AsyncFunction("shootPhoto") { promise: Promise ->
+      if (!isProductConnected) { promise.reject("NOT_CONNECTED", "No drone connected", null); return@AsyncFunction }
+      photoManager.shootPhoto { ok, err ->
+        if (ok) promise.resolve(mapOf("success" to true))
+        else promise.reject("SHOOT_FAILED", err ?: "unknown error", null)
+      }
+    }
+
+    AsyncFunction("startPhotoSession") { sessionId: String, intervalMs: Int, promise: Promise ->
+      if (!isProductConnected) { promise.reject("NOT_CONNECTED", "No drone connected", null); return@AsyncFunction }
+      val started = photoManager.startSession(sessionId, intervalMs.toLong())
+      if (started) {
+        promise.resolve(mapOf("success" to true, "sessionId" to sessionId, "intervalMs" to intervalMs))
+      } else {
+        promise.reject("SESSION_ACTIVE", "A photo session is already active. Stop it first.", null)
+      }
+    }
+
+    AsyncFunction("stopPhotoSession") { promise: Promise ->
+      val session = photoManager.stopSession()
+      if (session == null) {
+        promise.resolve(mapOf("success" to false, "reason" to "no active session"))
+      } else {
+        promise.resolve(mapOf(
+          "success" to true,
+          "sessionId" to session.sessionId,
+          "shotCount" to session.shotCount,
+          "startedAt" to session.startedAtMs,
+          "endedAt" to (session.endedAtMs ?: 0L)
+        ))
+      }
+    }
+
+    AsyncFunction("getActivePhotoSession") { promise: Promise ->
+      val session = photoManager.activeSession
+      if (session == null) promise.resolve(null)
+      else promise.resolve(mapOf(
+        "sessionId" to session.sessionId,
+        "shotCount" to session.shotCount,
+        "startedAt" to session.startedAtMs,
+        "intervalMs" to session.intervalMs
+      ))
+    }
+
+    AsyncFunction("downloadSessionPhotos") { sessionId: String, promise: Promise ->
+      if (!isProductConnected) { promise.reject("NOT_CONNECTED", "No drone connected", null); return@AsyncFunction }
+      photoManager.downloadSessionPhotos(sessionId) { downloaded, skipped, error ->
+        if (error != null) {
+          promise.reject("DOWNLOAD_FAILED", error, null)
+        } else {
+          promise.resolve(mapOf("downloaded" to downloaded, "skipped" to skipped))
+        }
+      }
+    }
+
+    AsyncFunction("listCaptureSessions") { promise: Promise ->
+      val out = photoManager.listSessionIds().map { sessionId ->
+        val manifest = photoManager.readManifest(sessionId)
+        val files = photoManager.listCapturesInSession(sessionId)
+        mapOf(
+          "sessionId" to sessionId,
+          "startedAt" to (manifest?.optLong("startedAt") ?: 0L),
+          "endedAt" to (manifest?.optLong("endedAt") ?: 0L),
+          "intervalMs" to (manifest?.optLong("intervalMs") ?: 0L),
+          "shotCount" to (manifest?.optInt("shotCount") ?: 0),
+          "downloadedCount" to files.size,
+          "totalBytes" to files.sumOf { it.length() }
+        )
+      }
+      promise.resolve(out)
+    }
+
+    AsyncFunction("listCapturesInSession") { sessionId: String, promise: Promise ->
+      val files = photoManager.listCapturesInSession(sessionId).map { f ->
+        mapOf(
+          "path" to f.absolutePath,
+          "uri" to android.net.Uri.fromFile(f).toString(),
+          "fileName" to f.name,
+          "sizeBytes" to f.length(),
+          "modifiedAt" to f.lastModified()
+        )
+      }
+      promise.resolve(files)
+    }
+
+    AsyncFunction("deleteCapture") { path: String, promise: Promise ->
+      promise.resolve(mapOf("success" to photoManager.deleteCapture(path)))
+    }
+
+    // ---------- Gimbal ----------
+
+    // Rotate the gimbal to an absolute pitch angle. Down is negative, so
+    // setGimbalPitch(-60) points the camera 60° toward the ground — ideal for
+    // rooftop/area inspection. Roll/yaw are left untouched.
+    AsyncFunction("setGimbalPitch") { degrees: Double, promise: Promise ->
+      if (!isProductConnected) { promise.reject("NOT_CONNECTED", "No drone connected", null); return@AsyncFunction }
+      try {
+        val rotation = GimbalAngleRotation().apply {
+          mode = GimbalAngleRotationMode.ABSOLUTE_ANGLE
+          pitch = degrees
+          roll = 0.0
+          yaw = 0.0
+          pitchIgnored = false
+          rollIgnored = true
+          yawIgnored = true
+          duration = 1.0
+        }
+        GimbalKey.KeyRotateByAngle.create().action(
+          rotation,
+          onSuccess = { _: EmptyMsg ->
+            Log.d(TAG, "Gimbal pitch → $degrees°")
+            promise.resolve(mapOf("success" to true, "pitch" to degrees))
+          },
+          onFailure = { error: IDJIError ->
+            promise.reject("GIMBAL_ERROR", "Failed to set gimbal pitch: ${error.description()}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("GIMBAL_ERROR", "Failed to set gimbal pitch: ${e.message}", e)
       }
     }
 
@@ -1096,7 +1348,8 @@ class ExpoDjiSdkModule : Module() {
         target.targetLocation = LocationCoordinate3D(latitude, longitude, altitude)
         target.maxSpeed = maxSpeed
         target.securityTakeoffHeight = 20 // Default security takeoff height
-        
+        currentFlyToTarget = target
+
         IntelligentFlightManager.getInstance().flyToMissionManager.startMission(target, null,
           object : CommonCallbacks.CompletionCallback {
             override fun onSuccess() {
@@ -1123,6 +1376,8 @@ class ExpoDjiSdkModule : Module() {
           object : CommonCallbacks.CompletionCallback {
             override fun onSuccess() {
               Log.i(TAG, "FlyTo mission stopped successfully")
+              currentFlyToInfo = null
+              currentFlyToTarget = null
               promise.resolve(mapOf(
                 "success" to true,
                 "message" to "FlyTo mission stopped successfully"
@@ -1141,19 +1396,33 @@ class ExpoDjiSdkModule : Module() {
 
     AsyncFunction("getFlyToMissionInfo") { promise: Promise ->
       try {
-        val flyToManager = IntelligentFlightManager.getInstance().flyToMissionManager
-        
-        // Create a basic status response since flyToInfo might not be directly accessible
+        val info = currentFlyToInfo
+        val target = currentFlyToTarget
+        val flyToModeName = info?.flyToMode?.name
+        // FlyToInfo only exposes flyToMode publicly; currentSpeed / distanceToTarget
+        // aren't part of the verified MSDK V5 surface so we don't fabricate them.
+        val isRunning = flyToModeName != null && flyToModeName != "NONE"
+
+        val targetLocation = target?.targetLocation?.let {
+          mapOf(
+            "latitude" to it.latitude,
+            "longitude" to it.longitude,
+            "altitude" to it.altitude
+          )
+        }
+
         promise.resolve(mapOf<String, Any?>(
-          "isRunning" to true, // We'll assume it's running if we can get the manager
+          "isRunning" to isRunning,
+          "flyToMode" to (flyToModeName ?: "NONE"),
           "currentSpeed" to 0.0,
-          "targetLocation" to null,
+          "targetLocation" to targetLocation,
           "distanceToTarget" to 0.0
         ))
       } catch (e: Exception) {
         Log.e(TAG, "Failed to get FlyTo mission info: ${e.message}", e)
         promise.resolve(mapOf<String, Any?>(
           "isRunning" to false,
+          "flyToMode" to "NONE",
           "currentSpeed" to 0.0,
           "targetLocation" to null,
           "distanceToTarget" to 0.0
@@ -1164,17 +1433,29 @@ class ExpoDjiSdkModule : Module() {
     // Waypoint Mission Functions
     AsyncFunction("isWaypointMissionSupported") { promise: Promise ->
       try {
-        // Waypoint missions are supported if WaypointMissionManager is available
-        // We'll initialize the state listener here
-        setupWaypointMissionStateListener()
-        
-        val isSupported = true // WaypointMissionManager exists, so supported
+        val sdkRegistered = SDKManager.getInstance().isRegistered
+        // Real preconditions for executing a waypoint mission: SDK registered,
+        // product connected, and the WaypointMissionManager singleton reachable.
+        val managerReachable = try {
+          WaypointMissionManager.getInstance() != null
+        } catch (e: Throwable) {
+          false
+        }
+        val isSupported = !FORCE_VIRTUAL_STICK_ONLY &&
+          sdkRegistered && isProductConnected && managerReachable
+
+        if (isSupported) {
+          setupWaypointMissionStateListener()
+        }
+
         val stateString = currentWaypointMissionState?.name ?: "UNKNOWN"
-        
+
         promise.resolve(mapOf(
           "isSupported" to isSupported,
           "success" to true,
-          "state" to stateString
+          "state" to stateString,
+          "sdkRegistered" to sdkRegistered,
+          "productConnected" to isProductConnected
         ))
       } catch (e: Exception) {
         Log.e(TAG, "Failed to check waypoint support: ${e.message}", e)
@@ -1204,6 +1485,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("loadWaypointMissionFromKML") { filePath: String, promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         if (!isProductConnected) {
           promise.resolve(mapOf(
@@ -1288,6 +1570,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("startWaypointMission") { missionFileName: String?, promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         if (missionFileName.isNullOrEmpty()) {
           promise.resolve(mapOf(
@@ -1336,6 +1619,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("stopWaypointMission") { missionFileName: String?, promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         if (missionFileName.isNullOrEmpty()) {
           promise.resolve(mapOf(
@@ -1375,6 +1659,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("pauseWaypointMission") { promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         WaypointMissionManager.getInstance().pauseMission(
           object : CommonCallbacks.CompletionCallback {
@@ -1398,6 +1683,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("resumeWaypointMission") { promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         WaypointMissionManager.getInstance().resumeMission(
           object : CommonCallbacks.CompletionCallback {
@@ -1436,6 +1722,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("convertKMLToKMZ") { kmlPath: String, heightMode: String, promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         initializeWPMZManager()
         
@@ -1616,6 +1903,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("validateKMZFile") { kmzPath: String, promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         initializeWPMZManager()
         
@@ -1676,6 +1964,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("uploadKMZToAircraft") { kmzPath: String, promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         if (!isProductConnected) {
           promise.reject("NOT_CONNECTED", "No drone connected. Please ensure drone is powered on and connected.", null)
@@ -1844,6 +2133,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("getAvailableWaylines") { kmzPath: String, promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         // Handle content URI or file path
         val actualFilePath = if (kmzPath.startsWith("content://")) {
@@ -1871,6 +2161,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("generateTestWaypointMission") { latitude: Double?, longitude: Double?, promise: Promise ->
+      if (rejectIfWaypointDisabled(promise)) return@AsyncFunction
       try {
         initializeWaypointMission()
         
@@ -2366,18 +2657,44 @@ class ExpoDjiSdkModule : Module() {
     }
   }
 
+  private fun setupFlyToMissionListener() {
+    try {
+      if (flyToInfoListener != null) return
+      val listener = object : IMissionInfoListener<FlyToInfo, FlyToTarget> {
+        override fun onMissionInfoUpdate(info: FlyToInfo) {
+          currentFlyToInfo = info
+        }
+
+        override fun onMissionTargetUpdate(target: FlyToTarget) {
+          currentFlyToTarget = target
+        }
+      }
+      IntelligentFlightManager.getInstance().flyToMissionManager.addMissionInfoListener(listener)
+      flyToInfoListener = listener
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to setup FlyTo mission listener: ${e.message}", e)
+    }
+  }
+
   private fun setupCameraStreamListener() {
     try {
       // Set up available camera updated listener
       availableCameraListener = object : ICameraStreamManager.AvailableCameraUpdatedListener {
         override fun onAvailableCameraUpdated(list: MutableList<ComponentIndexType>) {
-          val availableCameras = list.map { componentIndex ->
+          val snapshot = list.toList()
+          Log.d(TAG, "AvailableCameraUpdated: ${snapshot.joinToString { it.name }}")
+          // Push to all registered CameraStreamViews so any view waiting for
+          // its camera to enumerate can now attach its surface. This is what
+          // collapses the cold-start delay from ~60s to ~1s.
+          updateAvailableCameras(snapshot)
+
+          val availableCameras = snapshot.map { componentIndex ->
             mapOf(
               "value" to componentIndex.ordinal,
               "name" to getComponentIndexDisplayName(componentIndex)
             )
           }
-          
+
           sendEvent("onAvailableCameraUpdated", mapOf(
             "availableCameras" to availableCameras
           ))
@@ -2396,6 +2713,19 @@ class ExpoDjiSdkModule : Module() {
       }
       
       cameraStreamManager.addAvailableCameraUpdatedListener(availableCameraListener!!)
+
+      // Keep the H.264/H.265 decoder warm even when no surface is attached. By
+      // default MSDK pauses decoding when nothing references the stream, which
+      // means when our SurfaceView attaches it has to cold-start the decoder and
+      // wait for the next I-frame — that's the "sometimes shows, sometimes not /
+      // long delay" behavior. Keeping it alive makes the feed appear promptly and
+      // reliably. Ref: ICameraStreamManager.setKeepAliveDecoding.
+      try {
+        cameraStreamManager.setKeepAliveDecoding(true)
+        Log.d(TAG, "setKeepAliveDecoding(true) — decoder kept warm for prompt stream display")
+      } catch (e: Throwable) {
+        Log.w(TAG, "setKeepAliveDecoding failed: ${e.message}")
+      }
     } catch (e: Exception) {
       Log.e(TAG, "Failed to setup camera stream listener: ${e.message}", e)
     }

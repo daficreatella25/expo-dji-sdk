@@ -8,12 +8,20 @@ import {
   Alert,
   ActivityIndicator,
   Platform,
-  Clipboard
+  Clipboard,
+  Switch,
+  TextInput,
+  Modal
 } from 'react-native';
 import { useEvent } from 'expo';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
-import ExpoDjiSdk, { KMLMissionPreview, DebugLogEvent, importAndExecuteKMLFromContent, pauseKMLMission, resumeKMLMission, stopKMLMission } from 'expo-dji-sdk';
+import ExpoDjiSdk, { KMLMissionPreview, DebugLogEvent, importAndExecuteKMLFromContent, pauseKMLMission, resumeKMLMission, stopKMLMission, setCameraMode, startPhotoSession, stopPhotoSession } from 'expo-dji-sdk';
+import { BUNDLED_MISSION_KML, BUNDLED_MISSION_NAME } from '../missions/bundledMission';
+
+// Passphrase the operator must type to launch the bundled mission. Guards against
+// accidentally starting a real flight when nowhere near the mission site.
+const RUN_CONFIRM_PASSPHRASE = 'dafi';
 
 const KMLMissionScreen: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -27,6 +35,20 @@ const KMLMissionScreen: React.FC = () => {
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [missionStatus, setMissionStatus] = useState<'none' | 'running' | 'paused'>('none');
   const [missionProgress, setMissionProgress] = useState<{ currentWaypoint: number; totalWaypoints: number; progress: number } | null>(null);
+
+  // Auto photo-capture during the mission. When the mission starts we switch the
+  // camera to PHOTO mode and kick off a native timer that fires the shutter every
+  // `captureIntervalMs`. Photos land on the drone SD card; pull them to the phone
+  // afterwards from the Gallery screen. NOT a screen grab — this is the real DJI
+  // shutter at full sensor resolution.
+  const [autoCapture, setAutoCapture] = useState(true);
+  const [captureIntervalMs, setCaptureIntervalMs] = useState('2000');
+  const [captureSessionId, setCaptureSessionId] = useState<string | null>(null);
+  const [captureShotCount, setCaptureShotCount] = useState(0);
+
+  // Bundled-mission quick start + passphrase confirmation gate
+  const [confirmVisible, setConfirmVisible] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
 
   const addDebugLog = (message: string) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -273,6 +295,81 @@ const KMLMissionScreen: React.FC = () => {
       : `${distance.toFixed(0)} m`;
   };
 
+  // Begin auto-capture tied to this mission run. sessionId is mission-scoped so
+  // the Gallery groups all photos from one flight together, and so the backend
+  // upload later knows which mission each photo belongs to.
+  const beginCaptureSession = async () => {
+    if (!autoCapture) return;
+    const ms = Math.max(1500, parseInt(captureIntervalMs, 10) || 2000);
+    const sessionId = `mission-${Date.now()}`;
+    try {
+      await setCameraMode('PHOTO');
+      await startPhotoSession(sessionId, ms);
+      setCaptureSessionId(sessionId);
+      setCaptureShotCount(0);
+      addDebugLog(`📸 Auto-capture started (${ms}ms) → session ${sessionId}`);
+    } catch (e: any) {
+      addDebugLog(`⚠️ Auto-capture failed to start: ${e?.message ?? e}`);
+      Alert.alert(
+        'Capture not started',
+        `The mission is running but photo capture could not start: ${e?.message ?? e}\n\n` +
+          `Check the drone is connected and the camera is reachable.`,
+      );
+    }
+  };
+
+  const endCaptureSession = async (reason: string) => {
+    if (!captureSessionId) return;
+    try {
+      const res = await stopPhotoSession();
+      addDebugLog(`📸 Auto-capture stopped (${reason}) — ${res?.shotCount ?? '?'} shots`);
+    } catch (e: any) {
+      addDebugLog(`⚠️ Failed to stop capture: ${e?.message ?? e}`);
+    } finally {
+      setCaptureSessionId(null);
+    }
+  };
+
+  // Launch the bundled mission directly (no file pick/upload). Only called after
+  // the passphrase gate passes.
+  const runBundledMission = async () => {
+    setIsLoading(true);
+    try {
+      addDebugLog(`Starting BUNDLED mission: ${BUNDLED_MISSION_NAME}`);
+      const result = await importAndExecuteKMLFromContent(BUNDLED_MISSION_KML, {});
+      if (result.success) {
+        setMissionStatus('running');
+        addDebugLog('✅ Bundled mission started');
+        beginCaptureSession();
+        Alert.alert(
+          'Mission Started',
+          autoCapture
+            ? `"${BUNDLED_MISSION_NAME}" is running with auto-capture every ${captureIntervalMs}ms. Photos save to the drone SD — pull them from the Gallery after landing.`
+            : `"${BUNDLED_MISSION_NAME}" is running.`,
+        );
+      } else {
+        throw new Error(result.error || 'Failed to start bundled mission');
+      }
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      addDebugLog(`❌ ERROR starting bundled mission: ${msg}`);
+      Alert.alert('Error', `Failed to start mission: ${msg}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Validate the passphrase, then run. Wrong/empty input is rejected.
+  const confirmAndRunBundled = () => {
+    if (confirmText.trim().toLowerCase() !== RUN_CONFIRM_PASSPHRASE) {
+      Alert.alert('Not confirmed', `Type "${RUN_CONFIRM_PASSPHRASE}" exactly to launch the mission.`);
+      return;
+    }
+    setConfirmVisible(false);
+    setConfirmText('');
+    runBundledMission();
+  };
+
   const startMission = async () => {
     if (!selectedFile) {
       Alert.alert('Error', 'Please select a KML file first');
@@ -295,9 +392,14 @@ const KMLMissionScreen: React.FC = () => {
               if (result.success) {
                 setMissionStatus('running');
                 addDebugLog('✅ Mission started successfully');
+                // Kick off auto photo-capture for this run (fire-and-forget;
+                // it surfaces its own alert if the camera isn't reachable).
+                beginCaptureSession();
                 Alert.alert(
                   'Mission Started',
-                  'The virtual stick mission has been started. You can pause it at any time to regain manual control.',
+                  autoCapture
+                    ? `The mission is running and auto-capture is on (every ${captureIntervalMs}ms). Photos save to the drone SD card — pull them to the phone from the Gallery after landing.`
+                    : 'The virtual stick mission has been started. You can pause it at any time to regain manual control.',
                   [{ text: 'OK' }]
                 );
               } else {
@@ -384,8 +486,9 @@ const KMLMissionScreen: React.FC = () => {
             setIsLoading(true);
             try {
               addDebugLog('Stopping mission');
+              await endCaptureSession('mission stopped');
               const result = await stopKMLMission();
-              
+
               if (result.success) {
                 setMissionStatus('none');
                 setMissionProgress(null);
@@ -447,12 +550,14 @@ const KMLMissionScreen: React.FC = () => {
             case 'missionCompleted':
               setMissionStatus('none');
               setMissionProgress(null);
+              endCaptureSession('mission completed');
               addDebugLog('✅ Mission completed');
-              Alert.alert('Mission Complete', 'The KML mission has been completed successfully!');
+              Alert.alert('Mission Complete', 'The KML mission has been completed successfully! Pull the captured photos from the Gallery after landing.');
               break;
             case 'missionFailed':
               setMissionStatus('none');
               setMissionProgress(null);
+              endCaptureSession('mission failed');
               addDebugLog(`❌ Mission failed: ${event.error || 'Unknown error'}`);
               Alert.alert('Mission Failed', `Mission failed: ${event.error || 'Unknown error'}`);
               break;
@@ -472,6 +577,11 @@ const KMLMissionScreen: React.FC = () => {
       }
     };
 
+    // Live shot counter — fires once per shutter trigger during the session.
+    const shootSubscription = ExpoDjiSdk.addListener('onShootPhotoResult', (event: any) => {
+      if (event?.success) setCaptureShotCount(event.shotIndex);
+    });
+
     setupDebugLogging();
 
     return () => {
@@ -481,18 +591,81 @@ const KMLMissionScreen: React.FC = () => {
       if (missionSubscription) {
         missionSubscription.remove();
       }
+      shootSubscription.remove();
     };
   }, []);
 
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 200 }}>
+      {/* Quick-start: launch the bundled mission directly, gated by a passphrase. */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>⚡ Quick Start</Text>
+        <Text style={styles.quickStartName}>{BUNDLED_MISSION_NAME}</Text>
+        <Text style={styles.quickStartHint}>
+          Launches the bundled mission — no file pick/upload. You'll be asked to type a
+          passphrase first so it can't start by accident when you're away from the site.
+        </Text>
+        <TouchableOpacity
+          style={[styles.button, styles.quickStartButton]}
+          onPress={() => { setConfirmText(''); setConfirmVisible(true); }}
+          disabled={isLoading || missionStatus !== 'none'}
+        >
+          <Text style={styles.buttonText}>
+            {missionStatus !== 'none' ? 'Mission in progress…' : '🚀 Quick Start Mission'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Passphrase confirmation modal */}
+      <Modal visible={confirmVisible} transparent animationType="fade" onRequestClose={() => setConfirmVisible(false)}>
+        <View style={styles.confirmBackdrop}>
+          <View style={styles.confirmCard}>
+            <Text style={styles.confirmTitle}>Confirm mission start</Text>
+            <Text style={styles.confirmBody}>
+              About to launch{'\n'}<Text style={{ fontWeight: '700' }}>{BUNDLED_MISSION_NAME}</Text>.{'\n\n'}
+              The drone will take off and fly the route. Only confirm if you are on-site and the
+              area is clear. Type <Text style={{ fontWeight: '700' }}>{RUN_CONFIRM_PASSPHRASE}</Text> to proceed.
+            </Text>
+            <TextInput
+              style={styles.confirmInput}
+              value={confirmText}
+              onChangeText={setConfirmText}
+              placeholder={`type "${RUN_CONFIRM_PASSPHRASE}"`}
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoFocus
+            />
+            <View style={styles.confirmRow}>
+              <TouchableOpacity
+                style={[styles.button, styles.confirmCancel, { flex: 1, marginRight: 8 }]}
+                onPress={() => { setConfirmVisible(false); setConfirmText(''); }}
+              >
+                <Text style={styles.buttonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.button,
+                  styles.confirmRun,
+                  { flex: 1 },
+                  confirmText.trim().toLowerCase() !== RUN_CONFIRM_PASSPHRASE && { opacity: 0.4 },
+                ]}
+                onPress={confirmAndRunBundled}
+                disabled={confirmText.trim().toLowerCase() !== RUN_CONFIRM_PASSPHRASE}
+              >
+                <Text style={styles.buttonText}>Run mission</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>KML to KMZ Converter</Text>
-        
+
         {/* File Selection */}
-        <TouchableOpacity 
-          style={styles.button} 
+        <TouchableOpacity
+          style={styles.button}
           onPress={selectKMLFile}
           disabled={isLoading}
         >
@@ -604,33 +777,67 @@ const KMLMissionScreen: React.FC = () => {
             <Text style={styles.missionControlTitle}>Mission Execution</Text>
             
             {missionStatus === 'none' && (
-              <TouchableOpacity 
-                style={[styles.button, styles.startButton]}
-                onPress={startMission}
-                disabled={isLoading}
-              >
-                <Text style={styles.buttonText}>🚁 Start Mission</Text>
-              </TouchableOpacity>
+              <>
+                {/* Auto photo-capture config */}
+                <View style={styles.captureConfig}>
+                  <View style={styles.captureRow}>
+                    <Text style={styles.captureLabel}>📸 Auto-capture during mission</Text>
+                    <Switch value={autoCapture} onValueChange={setAutoCapture} />
+                  </View>
+                  {autoCapture && (
+                    <View style={styles.captureRow}>
+                      <Text style={styles.captureLabel}>Interval (ms)</Text>
+                      <TextInput
+                        style={styles.captureInput}
+                        value={captureIntervalMs}
+                        onChangeText={setCaptureIntervalMs}
+                        keyboardType="number-pad"
+                      />
+                    </View>
+                  )}
+                  {autoCapture && (
+                    <Text style={styles.captureHint}>
+                      Min 1500ms (Mini 3 shutter limit). Real drone photos → drone SD card →
+                      pull to phone from Gallery after landing.
+                    </Text>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={[styles.button, styles.startButton]}
+                  onPress={startMission}
+                  disabled={isLoading}
+                >
+                  <Text style={styles.buttonText}>🚁 Start Mission</Text>
+                </TouchableOpacity>
+              </>
             )}
 
             {missionStatus === 'running' && (
-              <View style={styles.missionControlsRow}>
-                <TouchableOpacity 
-                  style={[styles.button, styles.pauseButton, { flex: 1, marginRight: 8 }]}
-                  onPress={pauseMission}
-                  disabled={isLoading}
-                >
-                  <Text style={styles.buttonText}>⏸️ Pause</Text>
-                </TouchableOpacity>
-                
-                <TouchableOpacity 
-                  style={[styles.button, styles.stopButton, { flex: 1 }]}
-                  onPress={stopMission}
-                  disabled={isLoading}
-                >
-                  <Text style={styles.buttonText}>⏹️ Stop</Text>
-                </TouchableOpacity>
-              </View>
+              <>
+                {captureSessionId && (
+                  <View style={styles.captureLive}>
+                    <Text style={styles.captureLiveCount}>{captureShotCount}</Text>
+                    <Text style={styles.captureLiveLabel}>photos captured to drone SD</Text>
+                  </View>
+                )}
+                <View style={styles.missionControlsRow}>
+                  <TouchableOpacity
+                    style={[styles.button, styles.pauseButton, { flex: 1, marginRight: 8 }]}
+                    onPress={pauseMission}
+                    disabled={isLoading}
+                  >
+                    <Text style={styles.buttonText}>⏸️ Pause</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.button, styles.stopButton, { flex: 1 }]}
+                    onPress={stopMission}
+                    disabled={isLoading}
+                  >
+                    <Text style={styles.buttonText}>⏹️ Stop</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
             )}
 
             {missionStatus === 'paused' && (
@@ -1029,6 +1236,60 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     color: '#333',
   },
+  captureConfig: {
+    backgroundColor: '#F2F8FC',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#D6E8F4',
+  },
+  captureRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  captureLabel: { fontSize: 14, color: '#333', flex: 1 },
+  captureInput: {
+    borderWidth: 1,
+    borderColor: '#C5D8E6',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    minWidth: 90,
+    textAlign: 'right',
+    backgroundColor: 'white',
+    color: '#333',
+  },
+  captureHint: { fontSize: 11, color: '#6c757d', lineHeight: 15, marginTop: 2 },
+  captureLive: {
+    alignItems: 'center',
+    backgroundColor: '#0F1729',
+    borderRadius: 8,
+    paddingVertical: 16,
+    marginBottom: 12,
+  },
+  captureLiveCount: { color: '#40DEAC', fontSize: 40, fontWeight: '700' },
+  captureLiveLabel: { color: '#7F8B9E', fontSize: 11, letterSpacing: 0.5, textTransform: 'uppercase' },
+  quickStartName: { fontSize: 15, fontWeight: '700', color: '#0F1729', marginBottom: 4 },
+  quickStartHint: { fontSize: 12, color: '#6c757d', lineHeight: 17, marginBottom: 12 },
+  quickStartButton: { backgroundColor: '#7B61FF' },
+  confirmBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center', alignItems: 'center', padding: 24,
+  },
+  confirmCard: { backgroundColor: 'white', borderRadius: 12, padding: 20, width: '100%' },
+  confirmTitle: { fontSize: 17, fontWeight: '700', color: '#0F1729', marginBottom: 10 },
+  confirmBody: { fontSize: 13, color: '#333', lineHeight: 19, marginBottom: 14 },
+  confirmInput: {
+    borderWidth: 1, borderColor: '#C5D8E6', borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, color: '#0F1729',
+    marginBottom: 14, backgroundColor: '#F8FAFC',
+  },
+  confirmRow: { flexDirection: 'row' },
+  confirmCancel: { backgroundColor: '#6c757d' },
+  confirmRun: { backgroundColor: '#FF6B6B' },
   missionControlsRow: {
     flexDirection: 'row',
     marginBottom: 12,

@@ -28,7 +28,7 @@ class KMLVirtualStickExecutor {
         private const val CONTROL_LOOP_INTERVAL = 100L // 10Hz update rate
         private const val ARRIVAL_THRESHOLD_HORIZONTAL = 3.0 // meters
         private const val ARRIVAL_THRESHOLD_VERTICAL = 1.5 // meters
-        private const val MAX_HORIZONTAL_SPEED = 8.0 // m/s
+        private const val MAX_HORIZONTAL_SPEED = 1.5 // m/s — slow, for rooftop inspection + clean photos
         private const val MAX_VERTICAL_SPEED = 3.0 // m/s
         private const val MAX_YAW_SPEED = 60.0 // deg/s
         private const val DECELERATION_DISTANCE = 10.0 // meters to start slowing down
@@ -457,8 +457,9 @@ class KMLVirtualStickExecutor {
         // Calculate bearing to target (in degrees, 0-360)
         val bearing = calculateBearing(current, target)
         
-        // Calculate speed based on distance (slow down when approaching)
-        val maxSpeed = 8.0 // Normal speed for efficient mission execution (8 m/s)
+        // Calculate speed based on distance (slow down when approaching).
+        // Uses the MAX_HORIZONTAL_SPEED ceiling (1.5 m/s) so inspection stays gentle.
+        val maxSpeed = MAX_HORIZONTAL_SPEED
         val speedFactor = if (distance > DECELERATION_DISTANCE) {
             1.0
         } else {
