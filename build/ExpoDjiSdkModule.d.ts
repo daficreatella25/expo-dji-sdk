@@ -1,5 +1,5 @@
 import { NativeModule } from 'expo';
-import { ExpoDjiSdkModuleEvents, SDKInitializationResult, SDKTestResult, DroneConnectionStatus, VirtualStickState, DetailedDroneInfo, CameraStreamStatus, CameraStreamInfo, CameraIndex, FlightStatus, ReadinessCheck, CompassCalibrationStatus, AltitudeInfo, GPSLocation, FlyToMissionInfo, FlyToResult, WaypointMissionSupport, WaypointMissionState, WaypointMissionLoadResult, WaypointMissionResult, KMLMissionConfig, KMLMissionPreview, KMLMissionResult, KMLMissionStatus } from './ExpoDjiSdk.types';
+import { ExpoDjiSdkModuleEvents, SDKInitializationResult, SDKTestResult, DroneConnectionStatus, VirtualStickState, DetailedDroneInfo, CameraStreamStatus, CameraStreamInfo, CameraIndex, FlightStatus, ReadinessCheck, CompassCalibrationStatus, CompassHealth, PreflightReport, AltitudeInfo, GPSLocation, FlyToMissionInfo, FlyToResult, WaypointMissionSupport, WaypointMissionState, WaypointMissionLoadResult, WaypointMissionResult, KMLMissionConfig, KMLMissionPreview, KMLMissionResult, KMLMissionStatus } from './ExpoDjiSdk.types';
 declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
     testSDKClass(): Promise<SDKTestResult>;
     initializeSDK(): Promise<SDKInitializationResult>;
@@ -52,11 +52,13 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
     }>;
     getFlightStatus(): Promise<FlightStatus>;
     isReadyForTakeoff(): Promise<ReadinessCheck>;
+    getPreflightReport(): Promise<PreflightReport>;
     startCompassCalibration(): Promise<{
         success: boolean;
         message: string;
     }>;
     getCompassCalibrationStatus(): Promise<CompassCalibrationStatus>;
+    getCompassHealth(): Promise<CompassHealth>;
     getAltitude(): Promise<AltitudeInfo>;
     getGPSLocation(): Promise<GPSLocation>;
     startFlyToMission(latitude: number, longitude: number, altitude: number, maxSpeed: number): Promise<FlyToResult>;

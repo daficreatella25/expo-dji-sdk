@@ -28,9 +28,11 @@ export const isLandingConfirmationNeeded = () => ExpoDjiSdkModule.isLandingConfi
 // Flight Status and Readiness
 export const getFlightStatus = () => ExpoDjiSdkModule.getFlightStatus();
 export const isReadyForTakeoff = () => ExpoDjiSdkModule.isReadyForTakeoff();
+export const getPreflightReport = () => ExpoDjiSdkModule.getPreflightReport();
 // Calibration
 export const startCompassCalibration = () => ExpoDjiSdkModule.startCompassCalibration();
 export const getCompassCalibrationStatus = () => ExpoDjiSdkModule.getCompassCalibrationStatus();
+export const getCompassHealth = () => ExpoDjiSdkModule.getCompassHealth();
 // Altitude and GPS
 export const getAltitude = () => ExpoDjiSdkModule.getAltitude();
 export const getGPSLocation = () => ExpoDjiSdkModule.getGPSLocation();

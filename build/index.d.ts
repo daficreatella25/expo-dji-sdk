@@ -52,11 +52,13 @@ export declare const isLandingConfirmationNeeded: () => Promise<{
 }>;
 export declare const getFlightStatus: () => Promise<import("./ExpoDjiSdk.types").FlightStatus>;
 export declare const isReadyForTakeoff: () => Promise<import("./ExpoDjiSdk.types").ReadinessCheck>;
+export declare const getPreflightReport: () => Promise<import("./ExpoDjiSdk.types").PreflightReport>;
 export declare const startCompassCalibration: () => Promise<{
     success: boolean;
     message: string;
 }>;
 export declare const getCompassCalibrationStatus: () => Promise<import("./ExpoDjiSdk.types").CompassCalibrationStatus>;
+export declare const getCompassHealth: () => Promise<import("./ExpoDjiSdk.types").CompassHealth>;
 export declare const getAltitude: () => Promise<import("./ExpoDjiSdk.types").AltitudeInfo>;
 export declare const getGPSLocation: () => Promise<import("./ExpoDjiSdk.types").GPSLocation>;
 export declare const startFlyToMission: (latitude: number, longitude: number, altitude: number, maxSpeed: number) => Promise<import("./ExpoDjiSdk.types").FlyToResult>;

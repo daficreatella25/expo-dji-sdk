@@ -13,6 +13,8 @@ import {
   FlightStatus,
   ReadinessCheck,
   CompassCalibrationStatus,
+  CompassHealth,
+  PreflightReport,
   AltitudeInfo,
   GPSLocation,
   FlyToMissionInfo,
@@ -58,10 +60,12 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   // Flight Status and Readiness
   getFlightStatus(): Promise<FlightStatus>;
   isReadyForTakeoff(): Promise<ReadinessCheck>;
+  getPreflightReport(): Promise<PreflightReport>;
   
   // Calibration
   startCompassCalibration(): Promise<{ success: boolean; message: string }>;
   getCompassCalibrationStatus(): Promise<CompassCalibrationStatus>;
+  getCompassHealth(): Promise<CompassHealth>;
   
   // Altitude and GPS
   getAltitude(): Promise<AltitudeInfo>;

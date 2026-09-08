@@ -119,6 +119,32 @@ export type CompassCalibrationStatus = {
     status: 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN';
     description: string;
 };
+/** Current DJI-reported compass state, including whether the flight controller
+ * is actively reporting a compass error. */
+export type CompassHealth = CompassCalibrationStatus & {
+    hasError: boolean;
+    isCalibrating: boolean;
+};
+/**
+ * A snapshot taken directly from the DJI flight controller before a mission
+ * starts. `ready` only covers checks the SDK can determine reliably; DJI may
+ * still block takeoff for airspace, firmware, battery, or other flight-safety
+ * reasons when a command is issued.
+ */
+export type PreflightReport = {
+    sdkRegistered: boolean;
+    productConnected: boolean;
+    flightControllerConnected: boolean;
+    motorsOn: boolean;
+    isFlying: boolean;
+    flightMode: string;
+    compassHasError: boolean;
+    virtualStickEnabled: boolean;
+    virtualStickAuthorityOwner: string;
+    ready: boolean;
+    blockers: string[];
+    warnings: string[];
+};
 export type AltitudeInfo = {
     altitude: number;
     unit: string;
