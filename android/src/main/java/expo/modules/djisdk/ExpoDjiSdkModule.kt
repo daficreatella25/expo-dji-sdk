@@ -1227,6 +1227,104 @@ class ExpoDjiSdkModule : Module() {
       }
     }
 
+    // This is intentionally a conservative, inspectable readiness snapshot.
+    // DJI remains the final authority and can still reject a takeoff command
+    // for conditions that are not exposed here (for example, airspace rules).
+    AsyncFunction("getPreflightReport") { promise: Promise ->
+      val sdkRegistered = try {
+        SDKManager.getInstance().isRegistered
+      } catch (_: Exception) {
+        false
+      }
+
+      if (!isProductConnected) {
+        promise.resolve(mapOf(
+          "sdkRegistered" to sdkRegistered,
+          "productConnected" to false,
+          "flightControllerConnected" to false,
+          "motorsOn" to false,
+          "isFlying" to false,
+          "flightMode" to "UNKNOWN",
+          "compassHasError" to false,
+          "virtualStickEnabled" to false,
+          "virtualStickAuthorityOwner" to "UNKNOWN",
+          "ready" to false,
+          "blockers" to listOf("No aircraft connected"),
+          "warnings" to emptyList<String>()
+        ))
+        return@AsyncFunction
+      }
+
+      try {
+        FlightControllerKey.KeyConnection.create().get(
+          onSuccess = { flightControllerConnected ->
+            FlightControllerKey.KeyAreMotorsOn.create().get(
+              onSuccess = { motorsOn ->
+                FlightControllerKey.KeyIsFlying.create().get(
+                  onSuccess = { isFlying ->
+                    FlightControllerKey.KeyFlightModeString.create().get(
+                      onSuccess = { flightMode ->
+                        FlightControllerKey.KeyCompassHasError.create().get(
+                          onSuccess = { compassHasError ->
+                            val blockers = mutableListOf<String>()
+                            if (!sdkRegistered) blockers.add("DJI SDK is not registered")
+                            if (flightControllerConnected != true) blockers.add("Flight controller is not connected")
+                            if (motorsOn == true) blockers.add("Motors are already running")
+                            if (isFlying == true) blockers.add("Aircraft is already flying")
+                            if (compassHasError == true) blockers.add("Aircraft reports a compass error")
+
+                            val virtualStickEnabled = currentVirtualStickState?.isVirtualStickEnable ?: false
+                            val virtualStickOwner =
+                              currentVirtualStickState?.currentFlightControlAuthorityOwner?.name ?: "UNKNOWN"
+                            val warnings = mutableListOf<String>()
+                            if (virtualStickEnabled) {
+                              warnings.add("Virtual Stick is active; manual RC control may be unavailable")
+                            }
+
+                            promise.resolve(mapOf(
+                              "sdkRegistered" to sdkRegistered,
+                              "productConnected" to true,
+                              "flightControllerConnected" to (flightControllerConnected ?: false),
+                              "motorsOn" to (motorsOn ?: false),
+                              "isFlying" to (isFlying ?: false),
+                              "flightMode" to (flightMode ?: "UNKNOWN"),
+                              "compassHasError" to (compassHasError ?: false),
+                              "virtualStickEnabled" to virtualStickEnabled,
+                              "virtualStickAuthorityOwner" to virtualStickOwner,
+                              "ready" to blockers.isEmpty(),
+                              "blockers" to blockers,
+                              "warnings" to warnings
+                            ))
+                          },
+                          onFailure = { error ->
+                            promise.reject("PREFLIGHT_ERROR", "Failed to read compass health: ${error}", null)
+                          }
+                        )
+                      },
+                      onFailure = { error ->
+                        promise.reject("PREFLIGHT_ERROR", "Failed to read flight mode: ${error}", null)
+                      }
+                    )
+                  },
+                  onFailure = { error ->
+                    promise.reject("PREFLIGHT_ERROR", "Failed to read flying state: ${error}", null)
+                  }
+                )
+              },
+              onFailure = { error ->
+                promise.reject("PREFLIGHT_ERROR", "Failed to read motor state: ${error}", null)
+              }
+            )
+          },
+          onFailure = { error ->
+            promise.reject("PREFLIGHT_ERROR", "Failed to read flight controller state: ${error}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("PREFLIGHT_ERROR", "Failed to run preflight: ${e.message}", e)
+      }
+    }
+
     AsyncFunction("startCompassCalibration") { promise: Promise ->
       try {
         if (!isProductConnected) {
@@ -1234,12 +1332,24 @@ class ExpoDjiSdkModule : Module() {
           return@AsyncFunction
         }
 
-        FlightControllerKey.KeyStartCompassCalibration.create().action(
-          onSuccess = { result: EmptyMsg ->
-            promise.resolve(mapOf("success" to true, "message" to "Compass calibration started"))
+        FlightControllerKey.KeyAreMotorsOn.create().get(
+          onSuccess = { motorsOn ->
+            if (motorsOn == true) {
+              promise.reject("CALIBRATION_UNSAFE", "Turn the motors off before calibrating the compass", null)
+              return@get
+            }
+
+            FlightControllerKey.KeyStartCompassCalibration.create().action(
+              onSuccess = { _: EmptyMsg ->
+                promise.resolve(mapOf("success" to true, "message" to "Compass calibration started"))
+              },
+              onFailure = { error: IDJIError ->
+                promise.reject("CALIBRATION_ERROR", "Failed to start compass calibration: ${error}", null)
+              }
+            )
           },
-          onFailure = { error: IDJIError ->
-            promise.reject("CALIBRATION_ERROR", "Failed to start compass calibration: ${error.toString()}", null)
+          onFailure = { error ->
+            promise.reject("CALIBRATION_UNSAFE", "Cannot confirm that the motors are off: ${error}", null)
           }
         )
       } catch (e: Exception) {
@@ -1267,6 +1377,39 @@ class ExpoDjiSdkModule : Module() {
         )
       } catch (e: Exception) {
         promise.reject("CALIBRATION_STATUS_ERROR", "Failed to get compass calibration status: ${e.message}", e)
+      }
+    }
+
+    AsyncFunction("getCompassHealth") { promise: Promise ->
+      try {
+        if (!isProductConnected) {
+          promise.reject("NOT_CONNECTED", "No drone connected", null)
+          return@AsyncFunction
+        }
+
+        FlightControllerKey.KeyCompassHasError.create().get(
+          onSuccess = { hasError ->
+            FlightControllerKey.KeyCompassCalibrationStatus.create().get(
+              onSuccess = { status ->
+                val statusName = status?.name ?: "UNKNOWN"
+                promise.resolve(mapOf(
+                  "hasError" to (hasError ?: false),
+                  "isCalibrating" to (statusName == "HORIZONTAL" || statusName == "VERTICAL"),
+                  "status" to statusName,
+                  "description" to getCompassCalibrationDescription(statusName)
+                ))
+              },
+              onFailure = { error ->
+                promise.reject("COMPASS_HEALTH_ERROR", "Failed to read compass calibration: ${error}", null)
+              }
+            )
+          },
+          onFailure = { error ->
+            promise.reject("COMPASS_HEALTH_ERROR", "Failed to read compass health: ${error}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("COMPASS_HEALTH_ERROR", "Failed to read compass health: ${e.message}", e)
       }
     }
 

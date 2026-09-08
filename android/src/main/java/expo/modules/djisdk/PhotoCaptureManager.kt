@@ -193,14 +193,21 @@ class PhotoCaptureManager(private val context: Context) {
     sessionId: String,
     onComplete: (downloaded: Int, skipped: Int, error: String?) -> Unit
   ) {
+    // If a session manifest exists, filter to that flight's time window.
+    // If not (capture never started in-app, or photos predate it), fall back to
+    // pulling EVERY JPG on the SD card so the user still gets their photos.
     val manifest = readManifest(sessionId)
+    val startedAt: Long
+    val endedAt: Long
     if (manifest == null) {
-      onComplete(0, 0, "No manifest for session $sessionId")
-      return
+      Log.w(TAG, "downloadSessionPhotos: no manifest for $sessionId — pulling ALL SD photos")
+      startedAt = 0L
+      endedAt = Long.MAX_VALUE
+    } else {
+      startedAt = manifest.getLong("startedAt")
+      // 60s buffer to catch photos written just after stopSession (shutter race)
+      endedAt = (manifest.optLong("endedAt", System.currentTimeMillis())) + 60_000L
     }
-    val startedAt = manifest.getLong("startedAt")
-    // 60s buffer to catch photos written just after stopSession (shutter race)
-    val endedAt = (manifest.optLong("endedAt", System.currentTimeMillis())) + 60_000L
 
     val mediaManager = MediaDataCenter.getInstance().mediaManager
     mediaManager.enable(object : CommonCallbacks.CompletionCallback {
