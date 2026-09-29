@@ -137,9 +137,22 @@ export type LandingResult = {
 };
 
 // Calibration Types
+/** DJI MSDK v5 CompassCalibrationState. 'NONE' is kept for older builds. */
+export type CompassCalibrationState = 'IDLE' | 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN';
+
 export type CompassCalibrationStatus = {
-  status: 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN';
+  status: CompassCalibrationState;
   description: string;
+};
+
+/**
+ * Pushed on every change while a calibration is watched. The flight
+ * controller keeps its previous SUCCEEDED until a new run starts, so only a
+ * SUCCEEDED that follows HORIZONTAL/VERTICAL means this run succeeded.
+ */
+export type CompassCalibrationEvent = CompassCalibrationStatus & {
+  isCalibrating: boolean;
+  at: number;
 };
 
 /** Current DJI-reported compass state, including whether the flight controller
@@ -338,6 +351,7 @@ export type ExpoDjiSdkModuleEvents = {
     success: boolean;
     error: string;
   }) => void;
+  onCompassCalibrationState: (params: CompassCalibrationEvent) => void;
   onPhotoDownloadProgress: (params: {
     sessionId: string;
     fileName: string;

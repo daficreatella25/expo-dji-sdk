@@ -56,7 +56,14 @@ export declare const getPreflightReport: () => Promise<import("./ExpoDjiSdk.type
 export declare const startCompassCalibration: () => Promise<{
     success: boolean;
     message: string;
+    startedAt?: number;
 }>;
+export declare const stopCompassCalibration: () => Promise<{
+    success: boolean;
+}>;
+export declare const stopWatchingCompassCalibration: () => void;
+/** Live compass calibration status (after startCompassCalibration). */
+export declare const addCompassCalibrationListener: (listener: (event: import("./ExpoDjiSdk.types").CompassCalibrationEvent) => void) => import("expo-modules-core/build/ts-declarations/EventEmitter").EventSubscription;
 export declare const getCompassCalibrationStatus: () => Promise<import("./ExpoDjiSdk.types").CompassCalibrationStatus>;
 export declare const getCompassHealth: () => Promise<import("./ExpoDjiSdk.types").CompassHealth>;
 export declare const getAltitude: () => Promise<import("./ExpoDjiSdk.types").AltitudeInfo>;

@@ -39,6 +39,11 @@ export const getPreflightReport = () => ExpoDjiSdkModule.getPreflightReport();
 
 // Calibration
 export const startCompassCalibration = () => ExpoDjiSdkModule.startCompassCalibration();
+export const stopCompassCalibration = () => ExpoDjiSdkModule.stopCompassCalibration();
+export const stopWatchingCompassCalibration = () => ExpoDjiSdkModule.stopWatchingCompassCalibration();
+/** Live compass calibration status (after startCompassCalibration). */
+export const addCompassCalibrationListener = (listener: (event: import('./ExpoDjiSdk.types').CompassCalibrationEvent) => void) =>
+  ExpoDjiSdkModule.addListener('onCompassCalibrationState', listener);
 export const getCompassCalibrationStatus = () => ExpoDjiSdkModule.getCompassCalibrationStatus();
 export const getCompassHealth = () => ExpoDjiSdkModule.getCompassHealth();
 

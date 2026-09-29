@@ -63,7 +63,9 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   getPreflightReport(): Promise<PreflightReport>;
   
   // Calibration
-  startCompassCalibration(): Promise<{ success: boolean; message: string }>;
+  startCompassCalibration(): Promise<{ success: boolean; message: string; startedAt?: number }>;
+  stopCompassCalibration(): Promise<{ success: boolean }>;
+  stopWatchingCompassCalibration(): void;
   getCompassCalibrationStatus(): Promise<CompassCalibrationStatus>;
   getCompassHealth(): Promise<CompassHealth>;
   

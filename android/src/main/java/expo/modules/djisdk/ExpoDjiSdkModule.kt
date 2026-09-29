@@ -32,6 +32,8 @@ import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.v5.et.create
 import dji.v5.et.get
 import dji.v5.et.action
+import dji.v5.et.listen
+import dji.v5.et.cancelListen
 import dji.v5.manager.intelligent.IntelligentFlightManager
 import dji.v5.manager.intelligent.IMissionInfoListener
 import dji.v5.manager.intelligent.flyto.FlyToTarget
@@ -198,7 +200,7 @@ class ExpoDjiSdkModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress", "onCompassCalibrationState")
 
     OnDestroy {
       try {
@@ -287,6 +289,7 @@ class ExpoDjiSdkModule : Module() {
 
           override fun onProductDisconnect(productId: Int) {
             isProductConnected = false
+            unwatchCompassCalibration()
             currentVirtualStickState = null
             currentProductId = -1
             sendEvent("onDroneConnectionChange", mapOf(
@@ -1325,6 +1328,12 @@ class ExpoDjiSdkModule : Module() {
       }
     }
 
+    // Compass calibration, the way DJI's own UX SDK dialog does it: stop any
+    // earlier calibration, start a new one, and stream every status change
+    // (IDLE -> HORIZONTAL -> VERTICAL -> SUCCEEDED/FAILED) to JavaScript. The
+    // flight controller keeps reporting the previous SUCCEEDED until the new
+    // run begins, so success is only real after HORIZONTAL/VERTICAL was seen
+    // (decided in JS, see the app's compass calibration tracker).
     AsyncFunction("startCompassCalibration") { promise: Promise ->
       try {
         if (!isProductConnected) {
@@ -1338,14 +1347,25 @@ class ExpoDjiSdkModule : Module() {
               promise.reject("CALIBRATION_UNSAFE", "Turn the motors off before calibrating the compass", null)
               return@get
             }
-
-            FlightControllerKey.KeyStartCompassCalibration.create().action(
-              onSuccess = { _: EmptyMsg ->
-                promise.resolve(mapOf("success" to true, "message" to "Compass calibration started"))
-              },
-              onFailure = { error: IDJIError ->
-                promise.reject("CALIBRATION_ERROR", "Failed to start compass calibration: ${error}", null)
-              }
+            val start = {
+              watchCompassCalibration()
+              FlightControllerKey.KeyStartCompassCalibration.create().action(
+                onSuccess = { _: EmptyMsg ->
+                  promise.resolve(mapOf(
+                    "success" to true,
+                    "message" to "Compass calibration started",
+                    "startedAt" to System.currentTimeMillis().toDouble()
+                  ))
+                },
+                onFailure = { error: IDJIError ->
+                  promise.reject("CALIBRATION_ERROR", "Failed to start compass calibration: ${error}", null)
+                }
+              )
+            }
+            // A leftover calibration would make the start fail or report its old state.
+            FlightControllerKey.KeyStopCompassCalibration.create().action(
+              onSuccess = { _: EmptyMsg -> start() },
+              onFailure = { _: IDJIError -> start() }
             )
           },
           onFailure = { error ->
@@ -1355,6 +1375,24 @@ class ExpoDjiSdkModule : Module() {
       } catch (e: Exception) {
         promise.reject("CALIBRATION_ERROR", "Failed to start compass calibration: ${e.message}", e)
       }
+    }
+
+    AsyncFunction("stopCompassCalibration") { promise: Promise ->
+      try {
+        FlightControllerKey.KeyStopCompassCalibration.create().action(
+          onSuccess = { _: EmptyMsg -> promise.resolve(mapOf("success" to true)) },
+          onFailure = { error: IDJIError ->
+            promise.reject("CALIBRATION_ERROR", "Failed to stop compass calibration: ${error}", null)
+          }
+        )
+      } catch (e: Exception) {
+        promise.reject("CALIBRATION_ERROR", "Failed to stop compass calibration: ${e.message}", e)
+      }
+    }
+
+    /** Stops sending onCompassCalibrationState events (the calibration screen closed). */
+    Function("stopWatchingCompassCalibration") {
+      unwatchCompassCalibration()
     }
 
     AsyncFunction("getCompassCalibrationStatus") { promise: Promise ->
@@ -2900,9 +2938,44 @@ class ExpoDjiSdkModule : Module() {
     }
   }
 
+  private val compassListenerHolder = Any()
+  private var compassWatching = false
+  private var compassIsCalibrating = false
+  private var compassStatus = "UNKNOWN"
+
+  private fun emitCompassCalibrationState() {
+    sendEvent("onCompassCalibrationState", mapOf(
+      "status" to compassStatus,
+      "isCalibrating" to compassIsCalibrating,
+      "description" to getCompassCalibrationDescription(compassStatus),
+      "at" to System.currentTimeMillis().toDouble()
+    ))
+  }
+
+  private fun watchCompassCalibration() {
+    if (compassWatching) return
+    compassWatching = true
+    // getOnce = true delivers the current value first, then every change.
+    FlightControllerKey.KeyIsCompassCalibrating.create().listen(compassListenerHolder, true) { calibrating ->
+      compassIsCalibrating = calibrating == true
+      emitCompassCalibrationState()
+    }
+    FlightControllerKey.KeyCompassCalibrationStatus.create().listen(compassListenerHolder, true) { status ->
+      compassStatus = status?.name ?: "UNKNOWN"
+      emitCompassCalibrationState()
+    }
+  }
+
+  private fun unwatchCompassCalibration() {
+    if (!compassWatching) return
+    compassWatching = false
+    FlightControllerKey.KeyIsCompassCalibrating.create().cancelListen(compassListenerHolder)
+    FlightControllerKey.KeyCompassCalibrationStatus.create().cancelListen(compassListenerHolder)
+  }
+
   private fun getCompassCalibrationDescription(status: String): String {
     return when (status) {
-      "NONE" -> "No calibration in progress"
+      "IDLE", "NONE" -> "No calibration in progress"
       "HORIZONTAL" -> "Rotate aircraft horizontally"
       "VERTICAL" -> "Rotate aircraft vertically"
       "SUCCEEDED" -> "Calibration completed successfully"
