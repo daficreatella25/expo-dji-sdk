@@ -26,7 +26,8 @@ import {
   KMLMissionConfig,
   KMLMissionPreview,
   KMLMissionResult,
-  KMLMissionStatus
+  KMLMissionStatus,
+  ReturnToStartState,
 } from './ExpoDjiSdk.types';
 
 declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
@@ -66,6 +67,13 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   startCompassCalibration(): Promise<{ success: boolean; message: string; startedAt?: number }>;
   stopCompassCalibration(): Promise<{ success: boolean }>;
   stopWatchingCompassCalibration(): void;
+  startReturnToStart(): Promise<ReturnToStartState>;
+  pauseReturnToStart(): Promise<ReturnToStartState>;
+  resumeReturnToStart(): Promise<ReturnToStartState>;
+  landReturnToStart(): Promise<ReturnToStartState>;
+  confirmReturnLanding(): Promise<ReturnToStartState>;
+  cancelReturnToStart(): Promise<ReturnToStartState>;
+  getReturnToStartState(): ReturnToStartState;
   getCompassCalibrationStatus(): Promise<CompassCalibrationStatus>;
   getCompassHealth(): Promise<CompassHealth>;
   

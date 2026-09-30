@@ -46,6 +46,8 @@ class KMLMissionManager {
         fun onMissionFailed(error: String)
         fun onMissionPaused()
         fun onMissionResumed()
+        /** Stopped before the last waypoint (by the pilot or a return to start). */
+        fun onMissionStopped() {}
     }
 
     data class MissionProgress(
@@ -148,14 +150,8 @@ class KMLMissionManager {
     fun pauseMission(promise: Promise) {
         when (currentMissionType) {
             MissionType.WPMZ_MISSION -> {
-                try {
-                    // Use existing waypoint mission pause functionality
-                    // This would integrate with the existing pauseWaypointMission method
-                    promise.resolve(mapOf("success" to true, "message" to "WPMZ mission paused"))
-                    missionCallback?.onMissionPaused()
-                } catch (e: Exception) {
-                    promise.reject("PAUSE_ERROR", "Failed to pause: ${e.message}", null)
-                }
+                // Not wired to WaypointMissionManager: refuse rather than report a pause that did not happen.
+                promise.reject("NOT_SUPPORTED", "Pausing on-board waypoint missions is not supported; use the remote's pause button", null)
             }
             MissionType.VIRTUAL_STICK -> {
                 try {
@@ -175,13 +171,7 @@ class KMLMissionManager {
     fun resumeMission(promise: Promise) {
         when (currentMissionType) {
             MissionType.WPMZ_MISSION -> {
-                try {
-                    // Use existing waypoint mission resume functionality
-                    promise.resolve(mapOf("success" to true, "message" to "WPMZ mission resumed"))
-                    missionCallback?.onMissionResumed()
-                } catch (e: Exception) {
-                    promise.reject("RESUME_ERROR", "Failed to resume: ${e.message}", null)
-                }
+                promise.reject("NOT_SUPPORTED", "Resuming on-board waypoint missions is not supported", null)
             }
             MissionType.VIRTUAL_STICK -> {
                 try {
@@ -201,18 +191,12 @@ class KMLMissionManager {
     fun stopMission(promise: Promise) {
         when (currentMissionType) {
             MissionType.WPMZ_MISSION -> {
-                try {
-                    currentMissionType = MissionType.NONE
-                    promise.resolve(mapOf("success" to true, "message" to "WPMZ mission stopped"))
-                    missionCallback?.onMissionCompleted()
-                } catch (e: Exception) {
-                    promise.reject("STOP_ERROR", "Failed to stop: ${e.message}", null)
-                }
+                promise.reject("NOT_SUPPORTED", "Stopping on-board waypoint missions is not supported; use the remote's pause button", null)
             }
             MissionType.VIRTUAL_STICK -> {
                 try {
                     Log.d(TAG, "Stopping virtual stick mission")
-                    virtualStickExecutor.stopMission()
+                    virtualStickExecutor.stopMission(completed = false)
                     currentMissionType = MissionType.NONE
                     promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission stopped"))
                 } catch (e: Exception) {
@@ -223,6 +207,14 @@ class KMLMissionManager {
                 promise.reject("NO_MISSION", "No mission is currently running", null)
             }
         }
+    }
+
+    /** Stops a running virtual-stick route without reporting it complete. True if one was running. */
+    fun stopActiveMission(): Boolean {
+        if (currentMissionType != MissionType.VIRTUAL_STICK || !virtualStickExecutor.isRunning) return false
+        virtualStickExecutor.stopMission(completed = false)
+        currentMissionType = MissionType.NONE
+        return true
     }
 
     fun getMissionStatus(): Map<String, Any> {

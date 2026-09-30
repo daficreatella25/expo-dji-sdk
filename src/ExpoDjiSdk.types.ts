@@ -311,7 +311,8 @@ export type KMLMissionStatus = {
 };
 
 export type KMLMissionEvent = {
-  type: 'missionPrepared' | 'missionStarted' | 'missionProgress' | 'missionCompleted' | 'missionFailed' | 'missionPaused' | 'missionResumed';
+  // missionStopped: ended before the last waypoint (pilot or return to start); not a completion.
+  type: 'missionPrepared' | 'missionStarted' | 'missionProgress' | 'missionCompleted' | 'missionStopped' | 'missionFailed' | 'missionPaused' | 'missionResumed';
   data?: KMLMissionStats | KMLMissionProgress;
   missionType?: string;
   error?: string;
@@ -328,6 +329,43 @@ export type DebugLogsResponse = {
   logs: string[];
   count: number;
   enabled: boolean;
+};
+
+/**
+ * Return to start (ReturnToStartController.kt): fly back to DJI's take-off
+ * point at the altitude the return began at, descend slowly to hoverHeight,
+ * hover with the remote in control until the pilot confirms the landing spot,
+ * then DJI auto-landing.
+ */
+export type ReturnToStartPhase =
+  | 'idle'
+  | 'returning'
+  | 'descending'
+  | 'landing_check'
+  | 'landing'
+  | 'landed'
+  | 'cancelled'
+  | 'failed';
+
+export type ReturnToStartState = {
+  phase: ReturnToStartPhase;
+  paused: boolean;
+  pauseReason: string | null;
+  /** Metres to the take-off point. */
+  distanceToHome: number | null;
+  /** Metres above the take-off point (barometric). */
+  altitude: number | null;
+  /** Metres above the ground from the downward sensor, when it has a reading. */
+  groundHeight: number | null;
+  /** Altitude held on the way back. */
+  cruiseAltitude: number;
+  hoverHeight: number;
+  waitingForGps: boolean;
+  /** DJI landing protection is asking whether it is safe to touch down. */
+  landingConfirmationNeeded: boolean;
+  home: { latitude: number; longitude: number } | null;
+  error: string | null;
+  at: number;
 };
 
 export type ExpoDjiSdkModuleEvents = {
@@ -352,6 +390,7 @@ export type ExpoDjiSdkModuleEvents = {
     error: string;
   }) => void;
   onCompassCalibrationState: (params: CompassCalibrationEvent) => void;
+  onReturnToStartEvent: (params: ReturnToStartState) => void;
   onPhotoDownloadProgress: (params: {
     sessionId: string;
     fileName: string;

@@ -147,6 +147,10 @@ class ExpoDjiSdkModule : Module() {
   private var currentVirtualStickState: VirtualStickState? = null
   private var currentProductId: Int = -1
   private val kmlMissionManager = KMLMissionManager()
+  private val returnToStart = ReturnToStartController(
+    emit = { state -> sendEvent("onReturnToStartEvent", state) },
+    isVirtualStickEnabled = { currentVirtualStickState?.isVirtualStickEnable },
+  )
   
   // Camera stream management
   private val cameraStreamManager: ICameraStreamManager
@@ -200,9 +204,10 @@ class ExpoDjiSdkModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress", "onCompassCalibrationState")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress", "onCompassCalibrationState", "onReturnToStartEvent")
 
     OnDestroy {
+      returnToStart.dispose()
       try {
         VirtualStickManager.getInstance().clearAllVirtualStickStateListener()
       } catch (e: Throwable) {
@@ -2376,6 +2381,10 @@ class ExpoDjiSdkModule : Module() {
 
     // KML Mission Methods
     AsyncFunction("importKMLMission") { kmlFilePath: String, options: Map<String, Any>?, promise: Promise ->
+      if (returnToStart.isActive) {
+        promise.reject("RETURN_IN_PROGRESS", "Return to start is in progress; finish or cancel it first", null)
+        return@AsyncFunction
+      }
       try {
         val config = parseKMLMissionConfig(options ?: emptyMap())
         
@@ -2433,6 +2442,12 @@ class ExpoDjiSdkModule : Module() {
           override fun onMissionResumed() {
             sendEvent("onKMLMissionEvent", mapOf(
               "type" to "missionResumed"
+            ))
+          }
+
+          override fun onMissionStopped() {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionStopped"
             ))
           }
         }
@@ -2454,6 +2469,10 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("importKMLMissionFromContent") { kmlContent: String, options: Map<String, Any>?, promise: Promise ->
+      if (returnToStart.isActive) {
+        promise.reject("RETURN_IN_PROGRESS", "Return to start is in progress; finish or cancel it first", null)
+        return@AsyncFunction
+      }
       try {
         val config = parseKMLMissionConfig(options ?: emptyMap())
         
@@ -2513,6 +2532,12 @@ class ExpoDjiSdkModule : Module() {
               "type" to "missionResumed"
             ))
           }
+
+          override fun onMissionStopped() {
+            sendEvent("onKMLMissionEvent", mapOf(
+              "type" to "missionStopped"
+            ))
+          }
         }
 
         kmlMissionManager.importAndExecuteKMLFromContent(kmlContent, config, callback, promise)
@@ -2521,6 +2546,58 @@ class ExpoDjiSdkModule : Module() {
         Log.e(TAG, "Failed to import KML mission from content: ${e.message}", e)
         promise.reject("IMPORT_ERROR", "Failed to import KML mission from content: ${e.message}", null)
       }
+    }
+
+    // Return to start: fly back at the current altitude, descend slowly, hover
+    // and wait for the pilot to confirm the landing spot (ReturnToStartController).
+    AsyncFunction("startReturnToStart") { promise: Promise ->
+      if (!isProductConnected) {
+        promise.reject("NOT_CONNECTED", "No drone connected", null)
+        return@AsyncFunction
+      }
+      // A running route would fight over the sticks: stop it (as "stopped", not
+      // completed) and let its stick release finish before the return takes them.
+      val stoppedRoute = kmlMissionManager.stopActiveMission()
+      val begin = {
+        returnToStart.start { error ->
+          if (error == null) promise.resolve(returnToStart.state())
+          else promise.reject("RETURN_ERROR", error, null)
+        }
+      }
+      if (stoppedRoute) android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ begin() }, 1000L) else begin()
+    }
+
+    AsyncFunction("pauseReturnToStart") { promise: Promise ->
+      val error = returnToStart.pause("Paused from the app")
+      if (error == null) promise.resolve(returnToStart.state()) else promise.reject("RETURN_ERROR", error, null)
+    }
+
+    AsyncFunction("resumeReturnToStart") { promise: Promise ->
+      returnToStart.resume { error ->
+        if (error == null) promise.resolve(returnToStart.state()) else promise.reject("RETURN_ERROR", error, null)
+      }
+    }
+
+    AsyncFunction("landReturnToStart") { promise: Promise ->
+      returnToStart.land { error ->
+        if (error == null) promise.resolve(returnToStart.state()) else promise.reject("RETURN_ERROR", error, null)
+      }
+    }
+
+    AsyncFunction("confirmReturnLanding") { promise: Promise ->
+      returnToStart.confirmLanding { error ->
+        if (error == null) promise.resolve(returnToStart.state()) else promise.reject("RETURN_ERROR", error, null)
+      }
+    }
+
+    AsyncFunction("cancelReturnToStart") { promise: Promise ->
+      returnToStart.cancel { error ->
+        if (error == null) promise.resolve(returnToStart.state()) else promise.reject("RETURN_ERROR", error, null)
+      }
+    }
+
+    Function("getReturnToStartState") {
+      returnToStart.state()
     }
 
     AsyncFunction("pauseKMLMission") { promise: Promise ->

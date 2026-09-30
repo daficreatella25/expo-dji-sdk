@@ -34,6 +34,15 @@ export const startCompassCalibration = () => ExpoDjiSdkModule.startCompassCalibr
 export const stopCompassCalibration = () => ExpoDjiSdkModule.stopCompassCalibration();
 export const stopWatchingCompassCalibration = () => ExpoDjiSdkModule.stopWatchingCompassCalibration();
 /** Live compass calibration status (after startCompassCalibration). */
+// Return to start (see ReturnToStartState)
+export const startReturnToStart = () => ExpoDjiSdkModule.startReturnToStart();
+export const pauseReturnToStart = () => ExpoDjiSdkModule.pauseReturnToStart();
+export const resumeReturnToStart = () => ExpoDjiSdkModule.resumeReturnToStart();
+export const landReturnToStart = () => ExpoDjiSdkModule.landReturnToStart();
+export const confirmReturnLanding = () => ExpoDjiSdkModule.confirmReturnLanding();
+export const cancelReturnToStart = () => ExpoDjiSdkModule.cancelReturnToStart();
+export const getReturnToStartState = () => ExpoDjiSdkModule.getReturnToStartState();
+export const addReturnToStartListener = (listener) => ExpoDjiSdkModule.addListener('onReturnToStartEvent', listener);
 export const addCompassCalibrationListener = (listener) => ExpoDjiSdkModule.addListener('onCompassCalibrationState', listener);
 export const getCompassCalibrationStatus = () => ExpoDjiSdkModule.getCompassCalibrationStatus();
 export const getCompassHealth = () => ExpoDjiSdkModule.getCompassHealth();

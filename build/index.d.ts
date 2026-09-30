@@ -63,6 +63,14 @@ export declare const stopCompassCalibration: () => Promise<{
 }>;
 export declare const stopWatchingCompassCalibration: () => void;
 /** Live compass calibration status (after startCompassCalibration). */
+export declare const startReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const pauseReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const resumeReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const landReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const confirmReturnLanding: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const cancelReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const getReturnToStartState: () => import("./ExpoDjiSdk.types").ReturnToStartState;
+export declare const addReturnToStartListener: (listener: (state: import("./ExpoDjiSdk.types").ReturnToStartState) => void) => import("expo-modules-core/build/ts-declarations/EventEmitter").EventSubscription;
 export declare const addCompassCalibrationListener: (listener: (event: import("./ExpoDjiSdk.types").CompassCalibrationEvent) => void) => import("expo-modules-core/build/ts-declarations/EventEmitter").EventSubscription;
 export declare const getCompassCalibrationStatus: () => Promise<import("./ExpoDjiSdk.types").CompassCalibrationStatus>;
 export declare const getCompassHealth: () => Promise<import("./ExpoDjiSdk.types").CompassHealth>;

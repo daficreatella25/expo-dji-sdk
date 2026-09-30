@@ -120,8 +120,12 @@ class KMLVirtualStickExecutor {
         }
     }
 
-    fun stopMission() {
-        Log.d(TAG, "Stopping virtual stick mission")
+    val isRunning: Boolean
+        get() = isExecuting
+
+    /** Ends the route and hovers. Only a route that reached its last waypoint is reported complete. */
+    fun stopMission(completed: Boolean = false) {
+        Log.d(TAG, "Stopping virtual stick mission (completed=$completed)")
         
         controlJob?.cancel()
         isExecuting = false
@@ -134,7 +138,7 @@ class KMLVirtualStickExecutor {
         // Disable virtual stick mode
         disableVirtualStickMode()
         
-        callback?.onMissionCompleted()
+        if (completed) callback?.onMissionCompleted() else callback?.onMissionStopped()
     }
 
     private fun enableVirtualStickMode(callback: (Boolean) -> Unit) {
@@ -225,7 +229,7 @@ class KMLVirtualStickExecutor {
             if (currentWaypointIndex >= waypoints.size) {
                 Log.d(TAG, "Mission completed - reached all waypoints")
                 withContext(Dispatchers.Main) {
-                    stopMission()
+                    stopMission(completed = true)
                 }
             }
         }
