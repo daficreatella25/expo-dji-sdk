@@ -6,6 +6,7 @@ export * from './ExpoDjiSdk.types';
 
 // Export convenience functions
 import ExpoDjiSdkModule from './ExpoDjiSdkModule';
+import type { KMLMissionConfig } from './ExpoDjiSdk.types';
 
 // SDK Management
 export const testSDKClass = () => ExpoDjiSdkModule.testSDKClass();
@@ -43,7 +44,7 @@ export const stopCompassCalibration = () => ExpoDjiSdkModule.stopCompassCalibrat
 export const stopWatchingCompassCalibration = () => ExpoDjiSdkModule.stopWatchingCompassCalibration();
 /** Live compass calibration status (after startCompassCalibration). */
 // Return to start (see ReturnToStartState)
-export const startReturnToStart = () => ExpoDjiSdkModule.startReturnToStart();
+export const startReturnToStart = (options?: { autoLandAfterMs?: number }) => ExpoDjiSdkModule.startReturnToStart(options ?? {});
 export const pauseReturnToStart = () => ExpoDjiSdkModule.pauseReturnToStart();
 export const resumeReturnToStart = () => ExpoDjiSdkModule.resumeReturnToStart();
 export const landReturnToStart = () => ExpoDjiSdkModule.landReturnToStart();
@@ -93,8 +94,8 @@ export const getCameraStreamInfo = (cameraIndex: number) => ExpoDjiSdkModule.get
 // KML Mission Management
 export const previewKMLMissionFromContent = (kmlContent: string) => ExpoDjiSdkModule.previewKMLMissionFromContent(kmlContent);
 export const convertKMLContentToKMZ = (kmlContent: string) => ExpoDjiSdkModule.convertKMLContentToKMZ(kmlContent);
-export const importAndExecuteKMLFromContent = (kmlContent: string, options?: any) => ExpoDjiSdkModule.importKMLMissionFromContent(kmlContent, options);
-export const importKMLMissionFromContent = (kmlContent: string, options?: any) => ExpoDjiSdkModule.importKMLMissionFromContent(kmlContent, options);
+export const importAndExecuteKMLFromContent = (kmlContent: string, options?: KMLMissionConfig) => ExpoDjiSdkModule.importKMLMissionFromContent(kmlContent, options);
+export const importKMLMissionFromContent = (kmlContent: string, options?: KMLMissionConfig) => ExpoDjiSdkModule.importKMLMissionFromContent(kmlContent, options);
 export const pauseKMLMission = () => ExpoDjiSdkModule.pauseKMLMission();
 export const resumeKMLMission = () => ExpoDjiSdkModule.resumeKMLMission();
 export const stopKMLMission = () => ExpoDjiSdkModule.stopKMLMission();

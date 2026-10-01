@@ -56,6 +56,8 @@ class KMLVirtualStickExecutor {
     private var controlJob: Job? = null
     private var callback: KMLMissionManager.KMLMissionCallback? = null
     private var waypoints: List<KMLWaypoint> = emptyList()
+    private var faceCenter = false
+    private var climbFirst = true
 
 
     data class DronePosition(
@@ -67,7 +69,9 @@ class KMLVirtualStickExecutor {
 
     fun startMission(
         kmlWaypoints: List<KMLWaypoint>,
-        callback: KMLMissionManager.KMLMissionCallback
+        callback: KMLMissionManager.KMLMissionCallback,
+        faceCenter: Boolean = false,
+        climbFirst: Boolean = true
     ) {
         if (isExecuting) {
             Log.w(TAG, "Mission already executing")
@@ -76,6 +80,8 @@ class KMLVirtualStickExecutor {
 
         this.waypoints = kmlWaypoints
         this.callback = callback
+        this.faceCenter = faceCenter
+        this.climbFirst = climbFirst
         this.currentWaypointIndex = 0
         this.isExecuting = true
         this.isPaused = false
@@ -503,9 +509,16 @@ class KMLVirtualStickExecutor {
         // val pitch = -(velocityNorth * distanceScale).coerceIn(-maxSpeed, maxSpeed)
         // val roll = -(velocityEast * distanceScale).coerceIn(-maxSpeed, maxSpeed)
         
+        // Climb first: while the leg is well above the drone (straight after
+        // take-off), go straight up and only then move toward the waypoint.
+        val climbing = climbFirst && target.altitude - current.altitude > ARRIVAL_THRESHOLD_VERTICAL
+        if (climbing && System.currentTimeMillis() % 1000 < CONTROL_LOOP_INTERVAL) {
+            sendDebugToUI("⬆️ Climbing to ${target.altitude.format(0)}m before moving to WP${currentWaypointIndex + 1}")
+        }
+
         // Safety check: If commands are very small, set to zero to prevent jitter
-        val finalPitch = if (abs(pitch) < 0.1) 0.0 else pitch
-        val finalRoll = if (abs(roll) < 0.1) 0.0 else roll
+        val finalPitch = if (climbing || abs(pitch) < 0.1) 0.0 else pitch
+        val finalRoll = if (climbing || abs(roll) < 0.1) 0.0 else roll
         
         sendDebugToUI("🔄 EXPERIMENTAL: Swapped pitch/roll assignment")
         
@@ -547,8 +560,10 @@ class KMLVirtualStickExecutor {
             headingDifference
         }
         
-        // Apply smooth yaw rotation with max 30 deg/s
+        // Apply smooth yaw rotation with max 30 deg/s. Without faceCenter the
+        // heading is held: turning while the camera shoots smears the photos.
         val yaw = when {
+            !faceCenter -> 0.0
             abs(yawAdjustment) < 3.0 -> 0.0 // Dead zone to prevent jitter
             abs(yawAdjustment) > 30.0 -> yawAdjustment.coerceIn(-30.0, 30.0) // Fast rotation
             else -> yawAdjustment * 0.5 // Slow rotation when close to target heading

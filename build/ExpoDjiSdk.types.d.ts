@@ -224,6 +224,14 @@ export type KMLMissionConfig = {
     maxSpeed?: number;
     enableTakePhoto?: boolean;
     enableStartRecording?: boolean;
+    /** Turn the nose toward the middle of the route (orbits). Default false: heading held, sharper photos. */
+    faceCenter?: boolean;
+    /** Climb to a leg's altitude before moving sideways when it is above the drone. Default true. */
+    climbFirst?: boolean;
+    /** After the last waypoint, fly back to the take-off point (return to start). Default false. */
+    returnWhenDone?: boolean;
+    /** With returnWhenDone: land this many ms after reaching the hover height unless held. 0 = wait for the pilot. */
+    autoLandAfterMs?: number;
 };
 export type KMLMissionStats = {
     totalDistance: number;
@@ -262,10 +270,12 @@ export type KMLMissionStatus = {
     missionType: 'none' | 'native' | 'virtual_stick';
 };
 export type KMLMissionEvent = {
-    type: 'missionPrepared' | 'missionStarted' | 'missionProgress' | 'missionCompleted' | 'missionStopped' | 'missionFailed' | 'missionPaused' | 'missionResumed';
+    type: 'missionPrepared' | 'missionStarted' | 'missionProgress' | 'missionCompleted' | 'missionStopped' | 'missionFailed' | 'missionPaused' | 'missionResumed' | 'autoReturnFailed';
     data?: KMLMissionStats | KMLMissionProgress;
     missionType?: string;
     error?: string;
+    /** missionCompleted: the drone is about to fly home on its own (returnWhenDone). */
+    returning?: boolean;
 };
 export type DebugLogEvent = {
     timestamp: number;
@@ -280,9 +290,10 @@ export type DebugLogsResponse = {
 };
 /**
  * Return to start (ReturnToStartController.kt): fly back to DJI's take-off
- * point at the altitude the return began at, descend slowly to hoverHeight,
- * hover with the remote in control until the pilot confirms the landing spot,
- * then DJI auto-landing.
+ * point at the altitude the return began at, descend to hoverHeight (quick
+ * when high, slow near the end), hover with the remote in control until the
+ * pilot confirms the landing spot or the auto-land countdown runs out, then
+ * DJI auto-landing. Pause holds the countdown, or stops a landing in progress.
  */
 export type ReturnToStartPhase = 'idle' | 'returning' | 'descending' | 'landing_check' | 'landing' | 'landed' | 'cancelled' | 'failed';
 export type ReturnToStartState = {
@@ -301,6 +312,12 @@ export type ReturnToStartState = {
     waitingForGps: boolean;
     /** DJI landing protection is asking whether it is safe to touch down. */
     landingConfirmationNeeded: boolean;
+    /** Epoch ms when the countdown lands the drone; null when no countdown is running. */
+    autoLandAt: number | null;
+    /** Countdown length; 0 means the pilot has to tap Land. */
+    autoLandAfterMs: number;
+    /** Started by a finished route (returnWhenDone), not by the pilot. */
+    afterRoute: boolean;
     home: {
         latitude: number;
         longitude: number;

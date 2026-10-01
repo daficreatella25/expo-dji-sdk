@@ -6,6 +6,7 @@ import dji.sdk.keyvalue.value.common.EmptyMsg
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.sdk.keyvalue.value.flightcontroller.FlightCoordinateSystem
+import dji.sdk.keyvalue.value.flightcontroller.FlightMode
 import dji.sdk.keyvalue.value.flightcontroller.RollPitchControlMode
 import dji.sdk.keyvalue.value.flightcontroller.VerticalControlMode
 import dji.sdk.keyvalue.value.flightcontroller.VirtualStickFlightControlParam
@@ -36,15 +37,19 @@ import kotlin.math.sqrt
  *
  *   RETURNING      straight line to DJI's home point, holding the altitude the
  *                  return started at (no climb, no descent)
- *   DESCENDING     slow vertical descent over the home point to HOVER_HEIGHT
+ *   DESCENDING     vertical descent over the home point to HOVER_HEIGHT: quick
+ *                  when high, easing off over the last few metres
  *   LANDING_CHECK  hovers with virtual sticks OFF, so the remote can nudge it;
- *                  waits for the pilot to confirm the landing spot is clear
+ *                  waits for the pilot to confirm the landing spot is clear, or,
+ *                  with an auto-land delay, lands when the countdown runs out
  *   LANDING        DJI auto-landing; DJI's landing protection may ask for one
  *                  more confirmation just above the ground
  *   LANDED / CANCELLED / FAILED
  *
- * Pause (any flying phase) stops the aircraft and hands control back to the
- * remote; continue re-takes virtual sticks and carries on from the same phase.
+ * Pause while returning or descending stops the aircraft and hands control
+ * back to the remote; continue re-takes virtual sticks and carries on from the
+ * same phase. Pause at the landing check holds the countdown; pause while
+ * landing stops DJI's landing and goes back to the (held) landing check.
  * If virtual sticks are switched off from elsewhere (the remote's pause
  * button, DJI), the return pauses itself.
  *
@@ -60,15 +65,17 @@ class ReturnToStartController(
     private const val TAG = "ReturnToStart"
     private const val LOOP_MS = 100L // 10 Hz, like the route executor
     private const val REPORT_EVERY = 5 // state report every 0.5 s
-    const val MAX_SPEED = 1.5 // m/s, same ceiling as the routes
+    const val MAX_SPEED = 3.0 // m/s; no photos on the way back, so faster than the routes
     private const val MIN_SPEED = 0.3 // m/s while still more than ARRIVAL_RADIUS away
-    private const val DECELERATION_DISTANCE = 8.0 // m
+    private const val DECELERATION_DISTANCE = 12.0 // m
     const val ARRIVAL_RADIUS = 1.5 // m from the home point
     private const val ALTITUDE_GAIN = 0.5 // (m/s) per metre of altitude error while cruising
     private const val MAX_CRUISE_VERTICAL = 0.5 // m/s correction while holding altitude
-    const val DESCENT_SPEED = 0.5 // m/s
-    private const val FINAL_DESCENT_SPEED = 0.3 // m/s in the last FINAL_DESCENT_BAND metres
-    private const val FINAL_DESCENT_BAND = 2.0 // m
+    // Descent speed = DESCENT_GAIN × metres above the hover height, between
+    // MIN_DESCENT_SPEED and MAX_DESCENT_SPEED: 50 m → 3 m takes about 25 s.
+    const val MAX_DESCENT_SPEED = 2.5 // m/s, under DJI's 3 m/s so it stays out of its own downwash
+    private const val MIN_DESCENT_SPEED = 0.4 // m/s
+    private const val DESCENT_GAIN = 0.5 // (m/s) per metre
     const val HOVER_HEIGHT = 3.0 // m above the take-off point, where the pilot is asked
     const val MAX_RETURN_DISTANCE = 1000.0 // m; beyond this the home point is suspect
     // DJI's stick-state update can lag a moment behind enableVirtualStick.
@@ -83,6 +90,12 @@ class ReturnToStartController(
   @Volatile private var pauseReason: String? = null
   @Volatile private var landingConfirmationNeeded = false
   @Volatile private var lastError: String? = null
+  /** Countdown length at the landing check; 0 waits for the pilot. */
+  @Volatile private var autoLandAfterMs = 0L
+  /** When the countdown lands the drone (epoch ms); 0 = no countdown running. */
+  @Volatile private var autoLandAt = 0L
+  /** The route that just finished asked for this return (vs. the pilot's button). */
+  @Volatile private var afterRoute = false
   private var home: LocationCoordinate2D? = null
   private var cruiseAltitude = 0.0
   private var distanceToHome: Double? = null
@@ -106,6 +119,9 @@ class ReturnToStartController(
     "hoverHeight" to HOVER_HEIGHT,
     "waitingForGps" to waitingForGps,
     "landingConfirmationNeeded" to landingConfirmationNeeded,
+    "autoLandAt" to if (autoLandAt > 0) autoLandAt.toDouble() else null,
+    "autoLandAfterMs" to autoLandAfterMs.toDouble(),
+    "afterRoute" to afterRoute,
     "home" to home?.let { mapOf("latitude" to it.latitude, "longitude" to it.longitude) },
     "error" to lastError,
     "at" to System.currentTimeMillis().toDouble(),
@@ -113,8 +129,12 @@ class ReturnToStartController(
 
   private fun report() = emit(state())
 
-  /** Checks everything, then starts flying home. Returns an error message instead of starting. */
-  fun start(onStarted: (String?) -> Unit) {
+  /**
+   * Checks everything, then starts flying home. Returns an error message
+   * instead of starting. [autoLandAfterMs] > 0 lands on its own after hovering
+   * that long at the landing check (the pilot can hold or land sooner).
+   */
+  fun start(autoLandAfterMs: Long = 0L, afterRoute: Boolean = false, onStarted: (String?) -> Unit) {
     if (isActive) return onStarted("Return to start is already running")
     val flying = FlightControllerKey.KeyIsFlying.create().get(false) == true
     if (!flying) return onStarted("The drone is not flying")
@@ -141,6 +161,9 @@ class ReturnToStartController(
     landingConfirmationNeeded = false
     lastError = null
     vsLostSince = 0L
+    this.autoLandAfterMs = autoLandAfterMs.coerceAtLeast(0L)
+    this.afterRoute = afterRoute
+    autoLandAt = 0L
     // Already overhead: skip straight to the descent.
     phase = if (distance <= ARRIVAL_RADIUS) Phase.DESCENDING else Phase.RETURNING
     Log.i(TAG, "start: ${distance.toInt()} m to home, holding ${"%.1f".format(cruiseAltitude)} m")
@@ -159,19 +182,59 @@ class ReturnToStartController(
     }
   }
 
-  /** Stops the aircraft where it is and gives the remote control. */
-  fun pause(reason: String? = null): String? {
-    if (phase != Phase.RETURNING && phase != Phase.DESCENDING) return "Nothing to pause"
-    if (paused) return null
-    paused = true
-    pauseReason = reason
-    hover()
-    releaseSticks()
-    report()
-    return null
+  /**
+   * Stops the aircraft where it is and gives the remote control. At the
+   * landing check it holds the countdown; while landing it stops DJI's landing
+   * and hovers (back to a held landing check).
+   */
+  fun pause(reason: String? = null, onDone: (String?) -> Unit = {}) {
+    when (phase) {
+      Phase.LANDING_CHECK -> {
+        paused = true
+        pauseReason = reason
+        autoLandAt = 0L
+        report()
+        onDone(null)
+      }
+      Phase.LANDING -> FlightControllerKey.KeyStopAutoLanding.create().action(
+        onSuccess = { _: EmptyMsg ->
+          phase = Phase.LANDING_CHECK
+          paused = true
+          pauseReason = reason
+          autoLandAt = 0L
+          landingConfirmationNeeded = false
+          report()
+          onDone(null)
+        },
+        onFailure = { error: IDJIError ->
+          lastError = "DJI did not stop the landing: $error"
+          report()
+          onDone(lastError)
+        },
+      )
+      Phase.RETURNING, Phase.DESCENDING -> {
+        if (!paused) {
+          paused = true
+          pauseReason = reason
+          hover()
+          releaseSticks()
+          report()
+        }
+        onDone(null)
+      }
+      else -> onDone("Nothing to pause")
+    }
   }
 
   fun resume(onDone: (String?) -> Unit) {
+    if (phase == Phase.LANDING_CHECK && paused) {
+      // Continue = run the countdown again (or just wait, without one).
+      paused = false
+      pauseReason = null
+      startCountdown()
+      report()
+      return onDone(null)
+    }
     if ((phase != Phase.RETURNING && phase != Phase.DESCENDING) || !paused) return onDone("Nothing to continue")
     takeSticks { error ->
       if (error != null) {
@@ -191,9 +254,13 @@ class ReturnToStartController(
   /** The pilot confirmed the landing spot: DJI auto-landing from the hover. */
   fun land(onDone: (String?) -> Unit) {
     if (phase != Phase.LANDING_CHECK) return onDone("The drone is not waiting to land")
+    autoLandAt = 0L
     FlightControllerKey.KeyStartAutoLanding.create().action(
       onSuccess = { _: EmptyMsg ->
+        landingOffSince = 0L
         phase = Phase.LANDING
+        paused = false
+        pauseReason = null
         landingConfirmationNeeded = false
         report()
         onDone(null)
@@ -228,6 +295,7 @@ class ReturnToStartController(
     releaseSticks()
     phase = Phase.CANCELLED
     paused = false
+    autoLandAt = 0L
     landingConfirmationNeeded = false
     if (wasLanding) {
       FlightControllerKey.KeyStopAutoLanding.create().action(
@@ -281,6 +349,13 @@ class ReturnToStartController(
         }
         if (phase == Phase.RETURNING) stepReturning() else stepDescending()
       }
+      Phase.LANDING_CHECK -> {
+        val at = autoLandAt
+        if (at > 0 && !paused && System.currentTimeMillis() >= at) {
+          autoLandAt = 0L
+          land { error -> if (error != null) Log.w(TAG, "auto-land: $error") }
+        }
+      }
       Phase.LANDING -> {
         landingConfirmationNeeded = FlightControllerKey.KeyIsLandingConfirmationNeeded.create().get(false) == true
         val motorsOn = FlightControllerKey.KeyAreMotorsOn.create().get(true) == true
@@ -288,6 +363,13 @@ class ReturnToStartController(
         if (!motorsOn || !flying) {
           phase = Phase.LANDED
           landingConfirmationNeeded = false
+          report()
+        } else if (landingStoppedElsewhere()) {
+          // Throttle up on the remote (or DJI) ended the landing: hover, held.
+          phase = Phase.LANDING_CHECK
+          paused = true
+          pauseReason = "Landing stopped from the remote"
+          autoLandAt = 0L
           report()
         }
       }
@@ -307,6 +389,22 @@ class ReturnToStartController(
     val h = home
     waitingForGps = p == null || (p.latitude == 0.0 && p.longitude == 0.0)
     if (!waitingForGps && p != null && h != null) distanceToHome = distanceMeters(p.latitude, p.longitude, h.latitude, h.longitude)
+  }
+
+  private var landingOffSince = 0L
+
+  /** Flying, but no longer in a DJI landing mode for a couple of seconds. */
+  private fun landingStoppedElsewhere(): Boolean {
+    val mode = FlightControllerKey.KeyFlightMode.create().get(FlightMode.UNKNOWN)
+    val landingMode = mode == FlightMode.AUTO_LANDING || mode == FlightMode.FORCE_LANDING ||
+      mode == FlightMode.ATTI_LANDING || mode == FlightMode.UNKNOWN
+    if (landingMode || landingConfirmationNeeded) {
+      landingOffSince = 0L
+      return false
+    }
+    val now = System.currentTimeMillis()
+    if (landingOffSince == 0L) landingOffSince = now
+    return now - landingOffSince > VS_LOST_GRACE_MS
   }
 
   private fun sticksLost(): Boolean {
@@ -344,6 +442,7 @@ class ReturnToStartController(
       hover()
       releaseSticks()
       phase = Phase.LANDING_CHECK
+      startCountdown()
       report()
       return
     }
@@ -352,8 +451,14 @@ class ReturnToStartController(
       val distance = distanceToHome ?: 0.0
       if (distance < 0.5) Pair(0.0, 0.0) else velocityTowards(p, h, min(0.5, distance * 0.3))
     }
-    val speed = if (nearest - HOVER_HEIGHT < FINAL_DESCENT_BAND) FINAL_DESCENT_SPEED else DESCENT_SPEED
-    send(horizontal, -speed)
+    send(horizontal, -descentSpeed(nearest - HOVER_HEIGHT))
+  }
+
+  /** Descent speed (m/s) at [above] metres over the hover height. */
+  private fun descentSpeed(above: Double): Double = (above * DESCENT_GAIN).coerceIn(MIN_DESCENT_SPEED, MAX_DESCENT_SPEED)
+
+  private fun startCountdown() {
+    autoLandAt = if (autoLandAfterMs > 0) System.currentTimeMillis() + autoLandAfterMs else 0L
   }
 
   private fun fail(message: String) {

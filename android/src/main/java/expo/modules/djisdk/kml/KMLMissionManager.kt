@@ -15,7 +15,15 @@ data class MissionConfig(
     val speed: Float = 5.0f,
     val maxSpeed: Float = 10.0f,
     val enableTakePhoto: Boolean = false,
-    val enableStartRecording: Boolean = false
+    val enableStartRecording: Boolean = false,
+    /** Turn the nose toward the middle of the route (orbits/inspection). Off: hold heading, sharper photos. */
+    val faceCenter: Boolean = false,
+    /** Reach each leg's altitude before moving sideways when it is above the drone (take-off). */
+    val climbFirst: Boolean = true,
+    /** After the last waypoint, fly back to the take-off point (ReturnToStartController). */
+    val returnWhenDone: Boolean = false,
+    /** With returnWhenDone: land this long after reaching the hover height unless held. 0 = wait for the pilot. */
+    val autoLandAfterMs: Long = 0L
 )
 
 class KMLMissionManager {
@@ -333,7 +341,7 @@ class KMLMissionManager {
             currentMissionType = MissionType.VIRTUAL_STICK
             
             // Start virtual stick mission with original waypoints
-            virtualStickExecutor.startMission(originalWaypoints, callback)
+            virtualStickExecutor.startMission(originalWaypoints, callback, faceCenter = config.faceCenter, climbFirst = config.climbFirst)
             
             promise.resolve(mapOf(
                 "success" to true,

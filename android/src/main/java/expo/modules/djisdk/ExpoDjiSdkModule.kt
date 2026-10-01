@@ -2388,69 +2388,7 @@ class ExpoDjiSdkModule : Module() {
       try {
         val config = parseKMLMissionConfig(options ?: emptyMap())
         
-        val callback = object : KMLMissionManager.KMLMissionCallback {
-          override fun onMissionPrepared(stats: expo.modules.djisdk.kml.MissionStats) {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionPrepared",
-              "data" to mapOf(
-                "totalDistance" to stats.totalDistance,
-                "minAltitude" to stats.minAltitude,
-                "maxAltitude" to stats.maxAltitude,
-                "altitudeRange" to stats.altitudeRange
-              )
-            ))
-          }
-
-          override fun onMissionStarted(type: KMLMissionManager.MissionType) {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionStarted",
-              "missionType" to type.name.lowercase()
-            ))
-          }
-
-          override fun onMissionProgress(progress: KMLMissionManager.MissionProgress) {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionProgress",
-              "data" to mapOf(
-                "currentWaypoint" to progress.currentWaypoint,
-                "totalWaypoints" to progress.totalWaypoints,
-                "progress" to progress.progress,
-                "distanceToTarget" to progress.distanceToTarget
-              )
-            ))
-          }
-
-          override fun onMissionCompleted() {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionCompleted"
-            ))
-          }
-
-          override fun onMissionFailed(error: String) {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionFailed",
-              "error" to error
-            ))
-          }
-
-          override fun onMissionPaused() {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionPaused"
-            ))
-          }
-
-          override fun onMissionResumed() {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionResumed"
-            ))
-          }
-
-          override fun onMissionStopped() {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionStopped"
-            ))
-          }
-        }
+        val callback = kmlMissionCallback(config)
 
         kmlMissionManager.importAndExecuteKML(kmlFilePath, config, callback, promise)
         
@@ -2476,69 +2414,7 @@ class ExpoDjiSdkModule : Module() {
       try {
         val config = parseKMLMissionConfig(options ?: emptyMap())
         
-        val callback = object : KMLMissionManager.KMLMissionCallback {
-          override fun onMissionPrepared(stats: expo.modules.djisdk.kml.MissionStats) {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionPrepared",
-              "data" to mapOf(
-                "totalDistance" to stats.totalDistance,
-                "minAltitude" to stats.minAltitude,
-                "maxAltitude" to stats.maxAltitude,
-                "altitudeRange" to stats.altitudeRange
-              )
-            ))
-          }
-
-          override fun onMissionStarted(type: KMLMissionManager.MissionType) {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionStarted",
-              "missionType" to type.name.lowercase()
-            ))
-          }
-
-          override fun onMissionProgress(progress: KMLMissionManager.MissionProgress) {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionProgress",
-              "data" to mapOf(
-                "currentWaypoint" to progress.currentWaypoint,
-                "totalWaypoints" to progress.totalWaypoints,
-                "progress" to progress.progress,
-                "distanceToTarget" to progress.distanceToTarget
-              )
-            ))
-          }
-
-          override fun onMissionCompleted() {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionCompleted"
-            ))
-          }
-
-          override fun onMissionFailed(error: String) {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionFailed",
-              "error" to error
-            ))
-          }
-
-          override fun onMissionPaused() {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionPaused"
-            ))
-          }
-
-          override fun onMissionResumed() {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionResumed"
-            ))
-          }
-
-          override fun onMissionStopped() {
-            sendEvent("onKMLMissionEvent", mapOf(
-              "type" to "missionStopped"
-            ))
-          }
-        }
+        val callback = kmlMissionCallback(config)
 
         kmlMissionManager.importAndExecuteKMLFromContent(kmlContent, config, callback, promise)
         
@@ -2550,7 +2426,8 @@ class ExpoDjiSdkModule : Module() {
 
     // Return to start: fly back at the current altitude, descend slowly, hover
     // and wait for the pilot to confirm the landing spot (ReturnToStartController).
-    AsyncFunction("startReturnToStart") { promise: Promise ->
+    AsyncFunction("startReturnToStart") { options: Map<String, Any>?, promise: Promise ->
+      val autoLandAfterMs = (options?.get("autoLandAfterMs") as? Number)?.toLong() ?: 0L
       if (!isProductConnected) {
         promise.reject("NOT_CONNECTED", "No drone connected", null)
         return@AsyncFunction
@@ -2559,7 +2436,7 @@ class ExpoDjiSdkModule : Module() {
       // completed) and let its stick release finish before the return takes them.
       val stoppedRoute = kmlMissionManager.stopActiveMission()
       val begin = {
-        returnToStart.start { error ->
+        returnToStart.start(autoLandAfterMs = autoLandAfterMs) { error ->
           if (error == null) promise.resolve(returnToStart.state())
           else promise.reject("RETURN_ERROR", error, null)
         }
@@ -2568,8 +2445,9 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("pauseReturnToStart") { promise: Promise ->
-      val error = returnToStart.pause("Paused from the app")
-      if (error == null) promise.resolve(returnToStart.state()) else promise.reject("RETURN_ERROR", error, null)
+      returnToStart.pause("Paused from the app") { error ->
+        if (error == null) promise.resolve(returnToStart.state()) else promise.reject("RETURN_ERROR", error, null)
+      }
     }
 
     AsyncFunction("resumeReturnToStart") { promise: Promise ->
@@ -3195,12 +3073,103 @@ class ExpoDjiSdkModule : Module() {
     }
   }
 
+  /** Forwards route events to JS; a finished route can hand over to return-to-start. */
+  private fun kmlMissionCallback(config: expo.modules.djisdk.kml.MissionConfig) = object : KMLMissionManager.KMLMissionCallback {
+    override fun onMissionPrepared(stats: expo.modules.djisdk.kml.MissionStats) {
+      sendEvent("onKMLMissionEvent", mapOf(
+        "type" to "missionPrepared",
+        "data" to mapOf(
+          "totalDistance" to stats.totalDistance,
+          "minAltitude" to stats.minAltitude,
+          "maxAltitude" to stats.maxAltitude,
+          "altitudeRange" to stats.altitudeRange
+        )
+      ))
+    }
+
+    override fun onMissionStarted(type: KMLMissionManager.MissionType) {
+      sendEvent("onKMLMissionEvent", mapOf(
+        "type" to "missionStarted",
+        "missionType" to type.name.lowercase()
+      ))
+    }
+
+    override fun onMissionProgress(progress: KMLMissionManager.MissionProgress) {
+      sendEvent("onKMLMissionEvent", mapOf(
+        "type" to "missionProgress",
+        "data" to mapOf(
+          "currentWaypoint" to progress.currentWaypoint,
+          "totalWaypoints" to progress.totalWaypoints,
+          "progress" to progress.progress,
+          "distanceToTarget" to progress.distanceToTarget
+        )
+      ))
+    }
+
+    override fun onMissionCompleted() {
+      // The route's photos are done; stop the interval shutter here too, in
+      // case JS is asleep (screen off) and would keep it shooting on the way home.
+      photoManager.stopSession()
+      sendEvent("onKMLMissionEvent", mapOf(
+        "type" to "missionCompleted",
+        "returning" to config.returnWhenDone
+      ))
+      if (config.returnWhenDone) startReturnAfterRoute(config.autoLandAfterMs)
+    }
+
+    override fun onMissionFailed(error: String) {
+      sendEvent("onKMLMissionEvent", mapOf(
+        "type" to "missionFailed",
+        "error" to error
+      ))
+    }
+
+    override fun onMissionPaused() {
+      sendEvent("onKMLMissionEvent", mapOf(
+        "type" to "missionPaused"
+      ))
+    }
+
+    override fun onMissionResumed() {
+      sendEvent("onKMLMissionEvent", mapOf(
+        "type" to "missionResumed"
+      ))
+    }
+
+    override fun onMissionStopped() {
+      photoManager.stopSession()
+      sendEvent("onKMLMissionEvent", mapOf(
+        "type" to "missionStopped"
+      ))
+    }
+  }
+
+  /**
+   * The route released the sticks a moment ago; give that a second to settle
+   * (the drone hovers on its own meanwhile), then fly home. Done here rather
+   * than in JS so it still happens with the phone screen off.
+   */
+  private fun startReturnAfterRoute(autoLandAfterMs: Long) {
+    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+      returnToStart.start(autoLandAfterMs = autoLandAfterMs, afterRoute = true) { error ->
+        if (error != null) {
+          Log.w(TAG, "return after route: $error")
+          sendEvent("onKMLMissionEvent", mapOf("type" to "autoReturnFailed", "error" to error))
+        }
+      }
+    }, 1000L)
+  }
+
   private fun parseKMLMissionConfig(options: Map<String, Any>): expo.modules.djisdk.kml.MissionConfig {
     return expo.modules.djisdk.kml.MissionConfig(
       speed = (options["speed"] as? Number)?.toFloat() ?: 5.0f,
       maxSpeed = (options["maxSpeed"] as? Number)?.toFloat() ?: 10.0f,
       enableTakePhoto = options["enableTakePhoto"] as? Boolean ?: false,
-      enableStartRecording = options["enableStartRecording"] as? Boolean ?: false
+      enableStartRecording = options["enableStartRecording"] as? Boolean ?: false,
+      faceCenter = options["faceCenter"] as? Boolean ?: false,
+      climbFirst = options["climbFirst"] as? Boolean ?: true,
+      returnWhenDone = options["returnWhenDone"] as? Boolean ?: false,
+      autoLandAfterMs = (options["autoLandAfterMs"] as? Number)?.toLong() ?: 0L
     )
   }
   

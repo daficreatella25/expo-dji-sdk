@@ -1,6 +1,7 @@
 export { default } from './ExpoDjiSdkModule';
 export { default as CameraStreamView } from './CameraStreamView';
 export * from './ExpoDjiSdk.types';
+import type { KMLMissionConfig } from './ExpoDjiSdk.types';
 export declare const testSDKClass: () => Promise<import("./ExpoDjiSdk.types").SDKTestResult>;
 export declare const initializeSDK: () => Promise<import("./ExpoDjiSdk.types").SDKInitializationResult>;
 export declare const isDroneConnected: () => Promise<import("./ExpoDjiSdk.types").DroneConnectionStatus>;
@@ -63,7 +64,9 @@ export declare const stopCompassCalibration: () => Promise<{
 }>;
 export declare const stopWatchingCompassCalibration: () => void;
 /** Live compass calibration status (after startCompassCalibration). */
-export declare const startReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const startReturnToStart: (options?: {
+    autoLandAfterMs?: number;
+}) => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
 export declare const pauseReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
 export declare const resumeReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
 export declare const landReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
@@ -105,8 +108,8 @@ export declare const getCameraStreamStatus: (cameraIndex: number) => Promise<imp
 export declare const getCameraStreamInfo: (cameraIndex: number) => Promise<import("./ExpoDjiSdk.types").CameraStreamInfo>;
 export declare const previewKMLMissionFromContent: (kmlContent: string) => Promise<import("./ExpoDjiSdk.types").KMLMissionPreview>;
 export declare const convertKMLContentToKMZ: (kmlContent: string) => any;
-export declare const importAndExecuteKMLFromContent: (kmlContent: string, options?: any) => Promise<import("./ExpoDjiSdk.types").KMLMissionResult>;
-export declare const importKMLMissionFromContent: (kmlContent: string, options?: any) => Promise<import("./ExpoDjiSdk.types").KMLMissionResult>;
+export declare const importAndExecuteKMLFromContent: (kmlContent: string, options?: KMLMissionConfig) => Promise<import("./ExpoDjiSdk.types").KMLMissionResult>;
+export declare const importKMLMissionFromContent: (kmlContent: string, options?: KMLMissionConfig) => Promise<import("./ExpoDjiSdk.types").KMLMissionResult>;
 export declare const pauseKMLMission: () => Promise<{
     success: boolean;
     message: string;
