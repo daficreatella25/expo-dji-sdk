@@ -59,7 +59,9 @@ import kotlin.math.abs
  * (-90 straight down for mapping). Before every shot the real gimbal attitude
  * is read; if it is more than GIMBAL_TOLERANCE_DEG off (DJI levels the gimbal
  * around take-off; the remote's wheel can move it) the gimbal is tilted back
- * and that shot is skipped, so no photo of the horizon is ever taken.
+ * and that shot is skipped, for at most GIMBAL_MAX_HOLD_MS per misalignment;
+ * after that shots continue (re-tilting and warning) so photos are never lost
+ * to a wrong reading.
  *
  * IMPORTANT: MediaManager.enable() pauses the live video stream. We only call enable() during
  * downloadSessionPhotos and disable it immediately after, so the live preview comes back.
@@ -78,6 +80,9 @@ class PhotoCaptureManager(private val context: Context) {
     private const val GIMBAL_RETRY_MS = 2_000L // between tilt commands while it is still off
     private const val GIMBAL_RECHECK_MS = 500L // next look at the angle after a skipped shot
     private const val GIMBAL_WARN_EVERY_MS = 10_000L
+    // Never hold photos back longer than this for one misalignment: a wrong
+    // reading must not cost the whole flight's photos.
+    private const val GIMBAL_MAX_HOLD_MS = 6_000L
     private val TIMER_TOKEN = Any()
   }
 
@@ -154,10 +159,16 @@ class PhotoCaptureManager(private val context: Context) {
 
   // ---------- Gimbal ----------
 
-  /** The gimbal's real pitch (degrees, negative = down), or null when DJI has no reading. */
+  /**
+   * The gimbal's real pitch (degrees, negative = down), or null when DJI has
+   * no usable reading. An all-zero attitude counts as no reading: the Mini 3
+   * writes pitch 0 / yaw 0 into photos that were plainly taken looking down
+   * (mission 8d84cdf1), so zeros there mean "not reported", not "level".
+   */
   fun readGimbalPitch(): Double? =
     try {
-      KeyManager.getInstance().getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitude, componentIndex))?.pitch
+      val a = KeyManager.getInstance().getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitude, componentIndex))
+      if (a == null || (a.pitch == 0.0 && a.roll == 0.0 && a.yaw == 0.0)) null else a.pitch
     } catch (e: Exception) {
       null
     }
@@ -218,7 +229,8 @@ class PhotoCaptureManager(private val context: Context) {
       lastWarnAt = now
       onCameraAngleProblem?.invoke(pitch, target, (now - offSince) / 1000)
     }
-    return false
+    // Still off after the hold: shoot anyway (keep re-tilting and warning).
+    return now - offSince > GIMBAL_MAX_HOLD_MS
   }
 
   // ---------- Session timer ----------
