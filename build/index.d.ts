@@ -148,15 +148,48 @@ export interface ActiveSession {
     shotCount: number;
     startedAt: number;
     intervalMs: number;
+    /** Timer held (route paused, drone disconnected, or pausePhotoSession). */
+    paused: boolean;
 }
 export declare const setCameraMode: (mode: CameraMode) => any;
 export declare const shootPhoto: () => any;
-export declare const startPhotoSession: (sessionId: string, intervalMs: number) => any;
+/**
+ * Starts the interval shutter. With `resume: true` and an earlier manifest for
+ * this sessionId (same flight, e.g. continue from waypoint N), keeps its
+ * startedAt and adds a window instead of starting over. Calling it for the
+ * session that is already active just carries on.
+ */
+export declare const startPhotoSession: (sessionId: string, intervalMs: number, options?: {
+    resume?: boolean;
+}) => Promise<{
+    success: boolean;
+    sessionId: string;
+    intervalMs: number;
+}>;
+/** Holds the shutter and closes the current window; the session stays. The route does this itself when it pauses. */
+export declare const pausePhotoSession: () => Promise<{
+    success: boolean;
+    reason?: string;
+}>;
+/** Opens a new window and restarts the shutter. The route does this itself when it continues. */
+export declare const resumePhotoSession: () => Promise<{
+    success: boolean;
+    reason?: string;
+}>;
 export declare const stopPhotoSession: () => any;
 export declare const getActivePhotoSession: () => Promise<ActiveSession | null>;
+/**
+ * Copies this session's photos (taken inside its windows) to the phone.
+ * Rejects with a PhotoDownloadErrorCode; progress on onPhotoDownloadProgress.
+ */
 export declare const downloadSessionPhotos: (sessionId: string) => Promise<{
     downloaded: number;
     skipped: number;
+    failed: number;
+}>;
+/** Stops a running download (it rejects with CANCELLED). success: false when none was running. */
+export declare const cancelPhotoDownload: () => Promise<{
+    success: boolean;
 }>;
 export declare const listCaptureSessions: () => Promise<CaptureSession[]>;
 export declare const listCapturesInSession: (sessionId: string) => Promise<CapturedPhoto[]>;

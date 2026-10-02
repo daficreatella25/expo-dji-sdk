@@ -367,6 +367,25 @@ export type ReturnToStartState = {
     error: string | null;
     at: number;
 };
+/** onPhotoDownloadProgress: at most 4 per second, plus one with finished=true per photo. */
+export type PhotoDownloadProgress = {
+    sessionId: string;
+    fileName: string;
+    /** Bytes of this photo so far. */
+    downloaded: number;
+    total: number;
+    finished: boolean;
+    /** This photo's number (1-based) among `count` photos of the download ("N of M"). */
+    index: number;
+    count: number;
+};
+/**
+ * downloadSessionPhotos rejection codes: IN_FLIGHT (DJI only reads the SD card
+ * on the ground), NO_SESSION ("No photos from this flight": no manifest, and
+ * never a whole-card fallback), DOWNLOAD_BUSY, CANCELLED (cancelPhotoDownload),
+ * STORAGE (the phone could not store a photo), DOWNLOAD_FAILED, NOT_CONNECTED.
+ */
+export type PhotoDownloadErrorCode = 'IN_FLIGHT' | 'NO_SESSION' | 'DOWNLOAD_BUSY' | 'CANCELLED' | 'STORAGE' | 'DOWNLOAD_FAILED' | 'NOT_CONNECTED';
 export type ExpoDjiSdkModuleEvents = {
     onSDKRegistrationResult: (params: SDKInitializationResult) => void;
     onDroneConnectionChange: (params: DroneConnectionPayload) => void;
@@ -397,12 +416,6 @@ export type ExpoDjiSdkModuleEvents = {
     }) => void;
     onCompassCalibrationState: (params: CompassCalibrationEvent) => void;
     onReturnToStartEvent: (params: ReturnToStartState) => void;
-    onPhotoDownloadProgress: (params: {
-        sessionId: string;
-        fileName: string;
-        downloaded: number;
-        total: number;
-        finished: boolean;
-    }) => void;
+    onPhotoDownloadProgress: (params: PhotoDownloadProgress) => void;
 };
 //# sourceMappingURL=ExpoDjiSdk.types.d.ts.map

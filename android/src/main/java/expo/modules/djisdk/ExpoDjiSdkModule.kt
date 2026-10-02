@@ -167,6 +167,8 @@ class ExpoDjiSdkModule : Module() {
   @Volatile private var autoReturnPending = false
   @Volatile private var destroyed = false
   private var keepAliveOn = false
+  /** The route's pause (or a disconnect) paused the photo session; its Continue resumes it. */
+  @Volatile private var photosHeldByRoute = false
   
   // Camera stream management
   private val cameraStreamManager: ICameraStreamManager
@@ -185,13 +187,15 @@ class ExpoDjiSdkModule : Module() {
           "error" to (error ?: "")
         ))
       }
-      onDownloadProgress = { sessionId, fileName, downloaded, total, finished ->
-        sendEvent("onPhotoDownloadProgress", mapOf(
+      onDownloadProgress = { sessionId, fileName, downloaded, total, finished, index, count ->
+        safeSend("onPhotoDownloadProgress", mapOf(
           "sessionId" to sessionId,
           "fileName" to fileName,
           "downloaded" to downloaded,
           "total" to total,
-          "finished" to finished
+          "finished" to finished,
+          "index" to index,
+          "count" to count
         ))
       }
     }
@@ -329,7 +333,7 @@ class ExpoDjiSdkModule : Module() {
             // itself when the link comes back.
             kmlMissionManager.pauseActiveMission("Drone disconnected", KMLVirtualStickExecutor.SOURCE_DISCONNECT)
             returnToStart.onDisconnected()
-            stopPhotoTimer()
+            pausePhotoTimer()
             sendEvent("onDroneConnectionChange", mapOf(
               "connected" to false,
               "productId" to productId
@@ -716,9 +720,12 @@ class ExpoDjiSdkModule : Module() {
       }
     }
 
-    AsyncFunction("startPhotoSession") { sessionId: String, intervalMs: Int, promise: Promise ->
+    // options.resume: continue the manifest of an earlier part of the same flight
+    // (keeps its startedAt, adds a window) instead of starting over.
+    AsyncFunction("startPhotoSession") { sessionId: String, intervalMs: Int, options: Map<String, Any>?, promise: Promise ->
       if (!isProductConnected) { promise.reject("NOT_CONNECTED", "No drone connected", null); return@AsyncFunction }
-      val started = photoManager.startSession(sessionId, intervalMs.toLong())
+      val resume = options?.get("resume") as? Boolean ?: false
+      val started = photoManager.startSession(sessionId, intervalMs.toLong(), resume = resume)
       if (started) {
         promise.resolve(mapOf("success" to true, "sessionId" to sessionId, "intervalMs" to intervalMs))
       } else {
@@ -726,7 +733,19 @@ class ExpoDjiSdkModule : Module() {
       }
     }
 
+    AsyncFunction("pausePhotoSession") { promise: Promise ->
+      val paused = photoManager.pauseSession()
+      promise.resolve(if (paused) mapOf("success" to true) else mapOf("success" to false, "reason" to "no active session"))
+    }
+
+    AsyncFunction("resumePhotoSession") { promise: Promise ->
+      photosHeldByRoute = false
+      val resumed = photoManager.resumeSession()
+      promise.resolve(if (resumed) mapOf("success" to true) else mapOf("success" to false, "reason" to "no active session"))
+    }
+
     AsyncFunction("stopPhotoSession") { promise: Promise ->
+      photosHeldByRoute = false
       val session = photoManager.stopSession()
       if (session == null) {
         promise.resolve(mapOf("success" to false, "reason" to "no active session"))
@@ -748,19 +767,26 @@ class ExpoDjiSdkModule : Module() {
         "sessionId" to session.sessionId,
         "shotCount" to session.shotCount,
         "startedAt" to session.startedAtMs,
-        "intervalMs" to session.intervalMs
+        "intervalMs" to session.intervalMs,
+        "paused" to session.paused
       ))
     }
 
+    // Rejects IN_FLIGHT, NO_SESSION ("No photos from this flight"; never the
+    // whole SD card), DOWNLOAD_BUSY, CANCELLED, STORAGE or DOWNLOAD_FAILED.
     AsyncFunction("downloadSessionPhotos") { sessionId: String, promise: Promise ->
       if (!isProductConnected) { promise.reject("NOT_CONNECTED", "No drone connected", null); return@AsyncFunction }
-      photoManager.downloadSessionPhotos(sessionId) { downloaded, skipped, error ->
+      photoManager.downloadSessionPhotos(sessionId) { downloaded, skipped, failed, error ->
         if (error != null) {
-          promise.reject("DOWNLOAD_FAILED", error, null)
+          promise.reject(error.code, error.message, null)
         } else {
-          promise.resolve(mapOf("downloaded" to downloaded, "skipped" to skipped))
+          promise.resolve(mapOf("downloaded" to downloaded, "skipped" to skipped, "failed" to failed))
         }
       }
+    }
+
+    AsyncFunction("cancelPhotoDownload") { promise: Promise ->
+      promise.resolve(mapOf("success" to photoManager.cancelDownload()))
     }
 
     AsyncFunction("listCaptureSessions") { promise: Promise ->
@@ -3135,6 +3161,8 @@ class ExpoDjiSdkModule : Module() {
     }
 
     override fun onMissionPhase(phase: String, targetAltitude: Double?) {
+      // Climbing in place (or taking off): every shot would show the same spot.
+      photoManager.setSkipShots(phase == KMLVirtualStickExecutor.PHASE_TAKING_OFF || phase == KMLVirtualStickExecutor.PHASE_CLIMBING)
       safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionPhase",
         "phase" to phase,
@@ -3157,7 +3185,7 @@ class ExpoDjiSdkModule : Module() {
     override fun onMissionCompleted() {
       // The route's photos are done; stop the interval shutter here too, in
       // case JS is asleep (screen off) and would keep it shooting on the way home.
-      photoManager.stopSession()
+      endRoutePhotos()
       // Fires after the route released the sticks, so the return can take them now.
       if (config.returnWhenDone) startReturnAfterRoute(config.autoLandAfterMs)
       safeSend("onKMLMissionEvent", mapOf(
@@ -3168,7 +3196,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     override fun onMissionFailed(error: String) {
-      stopPhotoTimer()
+      endRoutePhotos()
       safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionFailed",
         "error" to error
@@ -3178,8 +3206,9 @@ class ExpoDjiSdkModule : Module() {
 
     override fun onMissionPaused(reason: String?, source: String) {
       // Lost control, DJI's own return/landing, disconnect...: no photos while
-      // the pilot flies, even with JS asleep.
-      stopPhotoTimer()
+      // the pilot flies, even with JS asleep. Same session; Continue resumes it.
+      if (photoManager.activeSession != null) photosHeldByRoute = true
+      pausePhotoTimer()
       safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionPaused",
         "reason" to reason,
@@ -3188,13 +3217,17 @@ class ExpoDjiSdkModule : Module() {
     }
 
     override fun onMissionResumed() {
+      if (photosHeldByRoute) {
+        photosHeldByRoute = false
+        photoManager.resumeSession()
+      }
       safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionResumed"
       ))
     }
 
     override fun onMissionStopped() {
-      photoManager.stopSession()
+      endRoutePhotos()
       safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionStopped"
       ))
@@ -3252,12 +3285,23 @@ class ExpoDjiSdkModule : Module() {
     return true
   }
 
-  /** Stops the interval shutter (route paused, failed, or the drone disconnected). */
-  private fun stopPhotoTimer() {
+  /** Holds the interval shutter (route paused or the drone disconnected); the session and its manifest stay. */
+  private fun pausePhotoTimer() {
     try {
+      photoManager.pauseSession()
+    } catch (e: Throwable) {
+      Log.w(TAG, "pausing the photo timer failed: ${e.message}")
+    }
+  }
+
+  /** The route ended (completed, stopped or failed): end its photo session. */
+  private fun endRoutePhotos() {
+    photosHeldByRoute = false
+    try {
+      photoManager.setSkipShots(false)
       photoManager.stopSession()
     } catch (e: Throwable) {
-      Log.w(TAG, "stopping the photo timer failed: ${e.message}")
+      Log.w(TAG, "stopping the photo session failed: ${e.message}")
     }
   }
 

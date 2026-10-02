@@ -126,6 +126,29 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
         message: string;
     }>;
     getKMLMissionStatus(): Promise<KMLMissionStatus>;
+    startPhotoSession(sessionId: string, intervalMs: number, options: {
+        resume?: boolean;
+    }): Promise<{
+        success: boolean;
+        sessionId: string;
+        intervalMs: number;
+    }>;
+    pausePhotoSession(): Promise<{
+        success: boolean;
+        reason?: string;
+    }>;
+    resumePhotoSession(): Promise<{
+        success: boolean;
+        reason?: string;
+    }>;
+    downloadSessionPhotos(sessionId: string): Promise<{
+        downloaded: number;
+        skipped: number;
+        failed: number;
+    }>;
+    cancelPhotoDownload(): Promise<{
+        success: boolean;
+    }>;
 }
 declare const _default: ExpoDjiSdkModule;
 export default _default;

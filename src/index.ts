@@ -132,17 +132,37 @@ export interface ActiveSession {
   shotCount: number;
   startedAt: number;
   intervalMs: number;
+  /** Timer held (route paused, drone disconnected, or pausePhotoSession). */
+  paused: boolean;
 }
 
 export const setCameraMode = (mode: CameraMode) => ExpoDjiSdkModule.setCameraMode(mode);
 export const shootPhoto = () => ExpoDjiSdkModule.shootPhoto();
-export const startPhotoSession = (sessionId: string, intervalMs: number) =>
-  ExpoDjiSdkModule.startPhotoSession(sessionId, intervalMs);
+/**
+ * Starts the interval shutter. With `resume: true` and an earlier manifest for
+ * this sessionId (same flight, e.g. continue from waypoint N), keeps its
+ * startedAt and adds a window instead of starting over. Calling it for the
+ * session that is already active just carries on.
+ */
+export const startPhotoSession = (sessionId: string, intervalMs: number, options?: { resume?: boolean }) =>
+  ExpoDjiSdkModule.startPhotoSession(sessionId, intervalMs, options ?? {});
+/** Holds the shutter and closes the current window; the session stays. The route does this itself when it pauses. */
+export const pausePhotoSession = () => ExpoDjiSdkModule.pausePhotoSession();
+/** Opens a new window and restarts the shutter. The route does this itself when it continues. */
+export const resumePhotoSession = () => ExpoDjiSdkModule.resumePhotoSession();
 export const stopPhotoSession = () => ExpoDjiSdkModule.stopPhotoSession();
 export const getActivePhotoSession = (): Promise<ActiveSession | null> =>
   ExpoDjiSdkModule.getActivePhotoSession();
-export const downloadSessionPhotos = (sessionId: string): Promise<{ downloaded: number; skipped: number }> =>
+/**
+ * Copies this session's photos (taken inside its windows) to the phone.
+ * Rejects with a PhotoDownloadErrorCode; progress on onPhotoDownloadProgress.
+ */
+export const downloadSessionPhotos = (
+  sessionId: string
+): Promise<{ downloaded: number; skipped: number; failed: number }> =>
   ExpoDjiSdkModule.downloadSessionPhotos(sessionId);
+/** Stops a running download (it rejects with CANCELLED). success: false when none was running. */
+export const cancelPhotoDownload = (): Promise<{ success: boolean }> => ExpoDjiSdkModule.cancelPhotoDownload();
 export const listCaptureSessions = (): Promise<CaptureSession[]> =>
   ExpoDjiSdkModule.listCaptureSessions();
 export const listCapturesInSession = (sessionId: string): Promise<CapturedPhoto[]> =>

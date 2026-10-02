@@ -88,10 +88,26 @@ export const getDebugLogs = () => ExpoDjiSdkModule.getDebugLogs();
 export const clearDebugLogs = () => ExpoDjiSdkModule.clearDebugLogs();
 export const setCameraMode = (mode) => ExpoDjiSdkModule.setCameraMode(mode);
 export const shootPhoto = () => ExpoDjiSdkModule.shootPhoto();
-export const startPhotoSession = (sessionId, intervalMs) => ExpoDjiSdkModule.startPhotoSession(sessionId, intervalMs);
+/**
+ * Starts the interval shutter. With `resume: true` and an earlier manifest for
+ * this sessionId (same flight, e.g. continue from waypoint N), keeps its
+ * startedAt and adds a window instead of starting over. Calling it for the
+ * session that is already active just carries on.
+ */
+export const startPhotoSession = (sessionId, intervalMs, options) => ExpoDjiSdkModule.startPhotoSession(sessionId, intervalMs, options ?? {});
+/** Holds the shutter and closes the current window; the session stays. The route does this itself when it pauses. */
+export const pausePhotoSession = () => ExpoDjiSdkModule.pausePhotoSession();
+/** Opens a new window and restarts the shutter. The route does this itself when it continues. */
+export const resumePhotoSession = () => ExpoDjiSdkModule.resumePhotoSession();
 export const stopPhotoSession = () => ExpoDjiSdkModule.stopPhotoSession();
 export const getActivePhotoSession = () => ExpoDjiSdkModule.getActivePhotoSession();
+/**
+ * Copies this session's photos (taken inside its windows) to the phone.
+ * Rejects with a PhotoDownloadErrorCode; progress on onPhotoDownloadProgress.
+ */
 export const downloadSessionPhotos = (sessionId) => ExpoDjiSdkModule.downloadSessionPhotos(sessionId);
+/** Stops a running download (it rejects with CANCELLED). success: false when none was running. */
+export const cancelPhotoDownload = () => ExpoDjiSdkModule.cancelPhotoDownload();
 export const listCaptureSessions = () => ExpoDjiSdkModule.listCaptureSessions();
 export const listCapturesInSession = (sessionId) => ExpoDjiSdkModule.listCapturesInSession(sessionId);
 export const deleteCapture = (path) => ExpoDjiSdkModule.deleteCapture(path);

@@ -125,6 +125,17 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   /** Ends the route (missionStopped): the drone hovers, the remote has control, the shutter stops. */
   stopKMLMission(): Promise<{ success: boolean; message: string }>;
   getKMLMissionStatus(): Promise<KMLMissionStatus>;
+
+  // Photo capture: one session per flight (PhotoCaptureManager.kt)
+  startPhotoSession(
+    sessionId: string,
+    intervalMs: number,
+    options: { resume?: boolean }
+  ): Promise<{ success: boolean; sessionId: string; intervalMs: number }>;
+  pausePhotoSession(): Promise<{ success: boolean; reason?: string }>;
+  resumePhotoSession(): Promise<{ success: boolean; reason?: string }>;
+  downloadSessionPhotos(sessionId: string): Promise<{ downloaded: number; skipped: number; failed: number }>;
+  cancelPhotoDownload(): Promise<{ success: boolean }>;
 }
 
 // This call loads the native module object from the JSI.
