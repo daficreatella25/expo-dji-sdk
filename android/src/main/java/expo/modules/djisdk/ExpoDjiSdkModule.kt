@@ -132,9 +132,31 @@ class ExpoDjiSdkModule : Module() {
     fun registerStreamView(view: CameraStreamView) {
       streamViews.add(view)
       view.onAvailableCamerasUpdated(cachedAvailableCameras)
+      applyKeepAliveDecoding()
     }
     fun unregisterStreamView(view: CameraStreamView) {
       streamViews.remove(view)
+      applyKeepAliveDecoding()
+    }
+
+    private var keepAliveDecoding: Boolean? = null
+
+    /**
+     * Keeps the H.264/H.265 decoder warm only while a live view is mounted
+     * (prompt video when it attaches); with no view it would decode for nobody.
+     * [force] re-applies it after a (re)connect.
+     */
+    @Synchronized
+    fun applyKeepAliveDecoding(force: Boolean = false) {
+      val on = streamViews.isNotEmpty()
+      if (!force && keepAliveDecoding == on) return
+      try {
+        MediaDataCenter.getInstance().cameraStreamManager.setKeepAliveDecoding(on)
+        keepAliveDecoding = on
+        Log.d(TAG, "setKeepAliveDecoding($on)")
+      } catch (e: Throwable) {
+        Log.w(TAG, "setKeepAliveDecoding failed: ${e.message}")
+      }
     }
     fun updateAvailableCameras(list: List<ComponentIndexType>) {
       cachedAvailableCameras = list
@@ -192,6 +214,7 @@ class ExpoDjiSdkModule : Module() {
   private val cameraStreamManager: ICameraStreamManager
     get() = MediaDataCenter.getInstance().cameraStreamManager
   private var availableCameraListener: ICameraStreamManager.AvailableCameraUpdatedListener? = null
+  private var virtualStickListener: VirtualStickStateListener? = null
   private var currentCameraSurfaces = mutableMapOf<Int, Surface>()
 
   // Photo-capture session manager (timer + post-flight bulk download)
@@ -264,6 +287,7 @@ class ExpoDjiSdkModule : Module() {
       } catch (e: Throwable) {
         Log.w(TAG, "OnDestroy: clearAllVirtualStickStateListener failed: ${e.message}")
       }
+      virtualStickListener = null
       try {
         WaypointMissionManager.getInstance().clearAllWaypointMissionExecuteStateListener()
       } catch (e: Throwable) {
@@ -2709,7 +2733,9 @@ class ExpoDjiSdkModule : Module() {
   
   private fun setupVirtualStickListener() {
     try {
-      VirtualStickManager.getInstance().setVirtualStickStateListener(object : VirtualStickStateListener {
+      // A reconnect must not stack a second listener (every event twice).
+      virtualStickListener?.let { VirtualStickManager.getInstance().removeVirtualStickStateListener(it) }
+      val listener = object : VirtualStickStateListener {
         override fun onVirtualStickStateUpdate(stickState: VirtualStickState) {
           currentVirtualStickState = stickState
           sendEvent("onVirtualStickStateChange", mapOf(
@@ -2728,7 +2754,9 @@ class ExpoDjiSdkModule : Module() {
             "reason" to reason.name
           ))
         }
-      })
+      }
+      VirtualStickManager.getInstance().setVirtualStickStateListener(listener)
+      virtualStickListener = listener
     } catch (e: Exception) {
       Log.e(TAG, "Failed to setup virtual stick listener: ${e.message}", e)
     }
@@ -2907,6 +2935,10 @@ class ExpoDjiSdkModule : Module() {
 
   private fun setupCameraStreamListener() {
     try {
+      // A reconnect must not stack a second listener.
+      availableCameraListener?.let {
+        try { cameraStreamManager.removeAvailableCameraUpdatedListener(it) } catch (e: Throwable) { Log.w(TAG, "remove camera listener: ${e.message}") }
+      }
       // Set up available camera updated listener
       availableCameraListener = object : ICameraStreamManager.AvailableCameraUpdatedListener {
         override fun onAvailableCameraUpdated(list: MutableList<ComponentIndexType>) {
@@ -2943,18 +2975,14 @@ class ExpoDjiSdkModule : Module() {
       
       cameraStreamManager.addAvailableCameraUpdatedListener(availableCameraListener!!)
 
-      // Keep the H.264/H.265 decoder warm even when no surface is attached. By
-      // default MSDK pauses decoding when nothing references the stream, which
-      // means when our SurfaceView attaches it has to cold-start the decoder and
-      // wait for the next I-frame — that's the "sometimes shows, sometimes not /
-      // long delay" behavior. Keeping it alive makes the feed appear promptly and
-      // reliably. Ref: ICameraStreamManager.setKeepAliveDecoding.
-      try {
-        cameraStreamManager.setKeepAliveDecoding(true)
-        Log.d(TAG, "setKeepAliveDecoding(true) — decoder kept warm for prompt stream display")
-      } catch (e: Throwable) {
-        Log.w(TAG, "setKeepAliveDecoding failed: ${e.message}")
-      }
+      // Keep the H.264/H.265 decoder warm while a live view is mounted, even
+      // before its surface attaches. By default MSDK pauses decoding when
+      // nothing references the stream, so an attaching view has to cold-start
+      // the decoder and wait for the next I-frame (the "sometimes shows,
+      // sometimes not / long delay" behavior). Without a view it stays off, so
+      // the phone does not decode video nobody sees.
+      // Ref: ICameraStreamManager.setKeepAliveDecoding.
+      applyKeepAliveDecoding(force = true)
     } catch (e: Exception) {
       Log.e(TAG, "Failed to setup camera stream listener: ${e.message}", e)
     }

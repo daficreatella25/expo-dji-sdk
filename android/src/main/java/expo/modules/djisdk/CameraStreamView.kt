@@ -80,12 +80,15 @@ class CameraStreamView(context: Context, appContext: AppContext) : ExpoView(cont
     super.onDetachedFromWindow()
   }
 
+  /** Called from DJI's thread; the view's state and surface are only touched on its UI thread. */
   fun onAvailableCamerasUpdated(list: List<ComponentIndexType>) {
-    val changed = list != availableCameras
-    availableCameras = list
-    if (changed) {
-      Log.d(TAG, "availableCameras → ${list.joinToString { it.name }}; retry attach")
-      tryAttachSurface()
+    post {
+      val changed = list != availableCameras
+      availableCameras = list
+      if (changed) {
+        Log.d(TAG, "availableCameras → ${list.joinToString { it.name }}; retry attach")
+        tryAttachSurface()
+      }
     }
   }
 

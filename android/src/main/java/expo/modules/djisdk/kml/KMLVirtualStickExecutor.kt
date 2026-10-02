@@ -56,6 +56,8 @@ class KMLVirtualStickExecutor(
         private const val GPS_WAIT_LIMIT_MS = 20_000L
         private const val STUCK_TIMEOUT_MS = 60_000L
         private const val STUCK_MIN_GAIN = 1.0 // metres closer that count as progress
+        // missionProgress: on every waypoint change, otherwise once a second.
+        private const val PROGRESS_EVERY_TICKS = (1000L / CONTROL_LOOP_INTERVAL).toInt()
 
         // missionPaused sources
         const val SOURCE_APP = "app"
@@ -83,22 +85,6 @@ class KMLVirtualStickExecutor(
 
     private enum class Outcome { COMPLETED, STOPPED, FAILED }
 
-    // Helper function to send debug logs to React Native UI
-    private fun sendDebugToUI(message: String) {
-        Log.d(TAG, message)
-        // Also send to KMLMissionManager for React Native display
-        try {
-            callback?.let { cb ->
-                if (cb is KMLMissionManager.KMLMissionCallback) {
-                    // This will show up in the KML Mission Screen debug logs
-                    android.util.Log.d("KMLMissionManager", "VS: $message")
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore if callback doesn't support debug logging
-        }
-    }
-
     // An unexpected error ends the route (sticks released); it must never crash the app mid-flight.
     private val scope = CoroutineScope(SupervisorJob() + dispatcher + CoroutineExceptionHandler { _, e -> onRouteThreadError(e) })
 
@@ -119,6 +105,13 @@ class KMLVirtualStickExecutor(
     private var waypoints: List<KMLWaypoint> = emptyList()
     /** Metres along the route from waypoint i to the last one (horizontal). */
     private var routeAfter: DoubleArray = DoubleArray(0)
+    // Middle of the route, for faceCenter; computed once per route.
+    private var centerLat = 0.0
+    private var centerLon = 0.0
+    // Control-loop ticks, for throttling (no wall-clock modulo tricks).
+    private var loopTick = 0
+    private var lastProgressTick = 0
+    private var lastProgressWaypoint = -1
     private var faceCenter = false
     private var climbFirst = true
     private var startedReported = false
@@ -192,7 +185,9 @@ class KMLVirtualStickExecutor(
             routeAfter = DoubleArray(kmlWaypoints.size).also { after ->
                 for (i in kmlWaypoints.size - 2 downTo 0) after[i] = after[i + 1] + distanceBetween(kmlWaypoints[i], kmlWaypoints[i + 1])
             }
-            if (firstIndex > 0) Log.i(TAG, "Continuing the route from waypoint ${firstIndex + 1}/${kmlWaypoints.size}")
+            centerLat = kmlWaypoints.map { it.latitude }.average()
+            centerLon = kmlWaypoints.map { it.longitude }.average()
+            lastProgressWaypoint = -1
             this@KMLVirtualStickExecutor.callback = callback
             this@KMLVirtualStickExecutor.faceCenter = faceCenter
             this@KMLVirtualStickExecutor.climbFirst = climbFirst
@@ -204,8 +199,7 @@ class KMLVirtualStickExecutor(
             resumeInFlight = false
             pauseDuringResume = null
 
-            sendDebugToUI("🚁 Starting KML virtual stick mission with ${waypoints.size} waypoints")
-            sendDebugToUI("📍 Target: ${waypoints.firstOrNull()?.let { "lat=${it.latitude}, lon=${it.longitude}" } ?: "No waypoints"}")
+            Log.i(TAG, "Starting route: ${kmlWaypoints.size} waypoints, first target ${firstIndex + 1}")
 
             // Check if drone is flying, if not, initiate takeoff first
             checkFlightStatusAndProceed(runId)
@@ -251,7 +245,7 @@ class KMLVirtualStickExecutor(
             }
             if (!isFlyingNow()) return@launch onDone("The drone is not flying")
 
-            Log.d(TAG, "Resuming virtual stick mission")
+            Log.i(TAG, "Resuming route")
             val run = runId
             resumeInFlight = true
             pauseDuringResume = null
@@ -294,7 +288,6 @@ class KMLVirtualStickExecutor(
     fun stopMission(onReleased: (() -> Unit)? = null): Boolean {
         if (!isExecuting) return false
         scope.launch {
-            Log.d(TAG, "Stopping virtual stick mission")
             if (!finish(Outcome.STOPPED, null, onReleased) && onReleased != null) {
                 // Ended a moment ago (completed or failed): wait for that release.
                 releaseWaiters?.add(onReleased) ?: onReleased()
@@ -374,14 +367,11 @@ class KMLVirtualStickExecutor(
 
     /** [done] gets null once DJI hands over the sticks, else the error (also after 10 s without an answer). */
     private fun enableVirtualStickMode(done: (String?) -> Unit) {
-        sendDebugToUI("🎮 Enabling ADVANCED virtual stick mode (like Litchi)")
-
         // CRITICAL: Enable Advanced Virtual Stick Mode first (like Litchi does)
         try {
             VirtualStickManager.getInstance().setVirtualStickAdvancedModeEnabled(true)
-            sendDebugToUI("✅ Advanced Virtual Stick Mode enabled")
         } catch (e: Exception) {
-            sendDebugToUI("❌ Failed to enable Advanced Virtual Stick Mode: ${e.message}")
+            Log.w(TAG, "Failed to enable Advanced Virtual Stick Mode: ${e.message}")
         }
 
         val settled = AtomicBoolean(false)
@@ -395,14 +385,10 @@ class KMLVirtualStickExecutor(
         }
         try {
             VirtualStickManager.getInstance().enableVirtualStick(object : CommonCallbacks.CompletionCallback {
-                override fun onSuccess() {
-                    sendDebugToUI("✅ Virtual stick control is now ACTIVE")
-                    setupVirtualStickParams()
-                    answer(null)
-                }
+                override fun onSuccess() { answer(null) }
 
                 override fun onFailure(error: IDJIError) {
-                    sendDebugToUI("❌ Failed to enable virtual stick: ${error.description()}")
+                    Log.w(TAG, "Failed to enable virtual stick: ${error.description()}")
                     answer(error.description() ?: error.toString())
                 }
             })
@@ -423,10 +409,7 @@ class KMLVirtualStickExecutor(
         }
         try {
             VirtualStickManager.getInstance().disableVirtualStick(object : CommonCallbacks.CompletionCallback {
-                override fun onSuccess() {
-                    Log.d(TAG, "Virtual stick mode disabled successfully")
-                    answer()
-                }
+                override fun onSuccess() { answer() }
 
                 override fun onFailure(error: IDJIError) {
                     Log.e(TAG, "Failed to disable virtual stick: ${error.description()}")
@@ -443,35 +426,16 @@ class KMLVirtualStickExecutor(
         }
     }
 
-    private fun setupVirtualStickParams() {
-        // Set virtual stick control modes (similar to Litchi)
-        val rollPitchControlMode = RollPitchControlMode.VELOCITY
-        val yawControlMode = YawControlMode.ANGULAR_VELOCITY
-        val verticalControlMode = VerticalControlMode.VELOCITY
-        val coordinateSystem = FlightCoordinateSystem.GROUND
-
-        Log.d(TAG, "Setting virtual stick control modes: " +
-              "RollPitch=$rollPitchControlMode, Yaw=$yawControlMode, " +
-              "Vertical=$verticalControlMode, CoordSystem=$coordinateSystem")
-    }
-
     private fun startControlLoop() {
         controlJob?.cancel()
         val run = runId
         vsLostSince = 0L
         controlJob = scope.launch {
-            Log.d(TAG, "Starting control loop at ${CONTROL_LOOP_INTERVAL}ms intervals")
-            Log.d(TAG, "Total waypoints to navigate: ${waypoints.size}")
-
-            // Log all waypoints for debugging
-            waypoints.forEachIndexed { index, waypoint ->
-                Log.d(TAG, "Waypoint $index: lat=${waypoint.latitude}, lon=${waypoint.longitude}, alt=${waypoint.altitude}")
-            }
-
+            Log.i(TAG, "Control loop started at waypoint ${currentWaypointIndex + 1}/${waypoints.size}")
             while (isActive && run == runId && isExecuting && !finished.get()) {
                 if (!isPaused) {
                     try {
-                        Log.v(TAG, "Control step: executing waypoint ${currentWaypointIndex + 1}/${waypoints.size}")
+                        loopTick++
                         executeControlStep()
                     } catch (e: CancellationException) {
                         throw e
@@ -502,8 +466,6 @@ class KMLVirtualStickExecutor(
 
         // Check if we have valid GPS position
         if (!gpsUsable(currentPosition)) {
-            sendDebugToUI("⚠️ Waiting for GPS lock... (hovering)")
-            sendDebugToUI("📍 Need GPS to navigate to: lat=${waypoints.firstOrNull()?.latitude}, lon=${waypoints.firstOrNull()?.longitude}")
             setPhase(PHASE_WAITING_FOR_GPS, null)
 
             // Send zero velocity to hover
@@ -519,7 +481,7 @@ class KMLVirtualStickExecutor(
             }
 
             // Update progress to show we're waiting for GPS
-            callback?.onMissionProgress(
+            reportProgress(
                 KMLMissionManager.MissionProgress(
                     currentWaypoint = currentWaypointIndex,
                     totalWaypoints = waypoints.size,
@@ -538,17 +500,11 @@ class KMLVirtualStickExecutor(
         val horizontalDistance = calculateHorizontalDistance(currentPosition, targetWaypoint)
         val verticalDistance = abs(currentPosition.altitude - targetWaypoint.altitude)
 
-        // Send navigation info to UI every 1 second (every 10th control loop)
-        if (System.currentTimeMillis() % 1000 < CONTROL_LOOP_INTERVAL) {
-            sendDebugToUI("🧭 Nav to WP${currentWaypointIndex + 1}/${waypoints.size}: ${horizontalDistance.format(0)}m away")
-            sendDebugToUI("📊 Drone: lat=${currentPosition.latitude.format(6)}, alt=${currentPosition.altitude.format(0)}m")
-        }
-
         // Check if we've arrived at the waypoint
         if (horizontalDistance <= ARRIVAL_THRESHOLD_HORIZONTAL &&
             verticalDistance <= ARRIVAL_THRESHOLD_VERTICAL) {
 
-            sendDebugToUI("🎯 Reached waypoint ${currentWaypointIndex + 1}/${waypoints.size}")
+            Log.i(TAG, "Reached waypoint ${currentWaypointIndex + 1}/${waypoints.size}")
 
             // Move to next waypoint
             currentWaypointIndex++
@@ -559,7 +515,7 @@ class KMLVirtualStickExecutor(
             val remaining = if (currentWaypointIndex < waypoints.size) {
                 calculateHorizontalDistance(currentPosition, waypoints[currentWaypointIndex]) + routeAfter[currentWaypointIndex]
             } else 0.0
-            callback?.onMissionProgress(
+            reportProgress(
                 KMLMissionManager.MissionProgress(
                     currentWaypoint = currentWaypointIndex,
                     totalWaypoints = waypoints.size,
@@ -570,7 +526,6 @@ class KMLVirtualStickExecutor(
             )
 
             if (currentWaypointIndex >= waypoints.size) {
-                Log.d(TAG, "Mission completed - reached all waypoints")
                 finish(Outcome.COMPLETED, null)
             }
             return
@@ -589,11 +544,6 @@ class KMLVirtualStickExecutor(
         // Calculate control inputs using Litchi-style navigation
         val velocityCommand = calculateVelocityCommand(currentPosition, targetWaypoint, horizontalDistance, climbing)
 
-        // Log detailed velocity commands every 1 second
-        if (System.currentTimeMillis() % 1000 < CONTROL_LOOP_INTERVAL) {
-            sendDebugToUI("🎮 Velocity: pitch=${velocityCommand.pitch.format(1)}, roll=${velocityCommand.roll.format(1)}, vert=${velocityCommand.verticalThrottle.format(1)}")
-        }
-
         // Send virtual stick command
         sendVirtualStickCommand(velocityCommand)
 
@@ -601,7 +551,7 @@ class KMLVirtualStickExecutor(
         val progress = (currentWaypointIndex.toFloat() +
                        (1.0f - (horizontalDistance.toFloat() / 100.0f).coerceIn(0.0f, 1.0f))) / waypoints.size.toFloat()
 
-        callback?.onMissionProgress(
+        reportProgress(
             KMLMissionManager.MissionProgress(
                 currentWaypoint = currentWaypointIndex,
                 totalWaypoints = waypoints.size,
@@ -652,8 +602,17 @@ class KMLVirtualStickExecutor(
         return level != GPSSignalLevel.LEVEL_0 && level != GPSSignalLevel.LEVEL_1 && level != GPSSignalLevel.LEVEL_NONE
     }
 
+    /** On a waypoint change at once, otherwise at most once a second; sent from this thread. */
+    private fun reportProgress(progress: KMLMissionManager.MissionProgress) {
+        if (progress.currentWaypoint == lastProgressWaypoint && loopTick - lastProgressTick < PROGRESS_EVERY_TICKS) return
+        lastProgressWaypoint = progress.currentWaypoint
+        lastProgressTick = loopTick
+        callback?.onMissionProgress(progress)
+    }
+
     private fun setPhase(newPhase: String, targetAltitude: Double?) {
         if (newPhase == phase && targetAltitude == phaseTarget) return
+        if (newPhase != phase) Log.i(TAG, "Phase: $newPhase${targetAltitude?.let { " (to ${"%.1f".format(it)} m)" } ?: ""}")
         phase = newPhase
         phaseTarget = targetAltitude
         callback?.onMissionPhase(newPhase, targetAltitude)
@@ -677,88 +636,31 @@ class KMLVirtualStickExecutor(
         else -> "DJI is landing the drone"
     }
 
+    /** Latitude/longitude 0,0 when there is no GPS position (the step then waits for GPS). */
     private fun getCurrentDronePosition(): DronePosition {
-        // Get current aircraft location using DJI SDK v5
-        try {
-            // Try multiple methods to get GPS position
-            var location: LocationCoordinate3D? = null
-            var altitude = 0.0f
-            var heading = 0.0f
-            
-            // Method 1: Try KeyAircraftLocation3D (primary)
-            try {
-                val locationKey = FlightControllerKey.KeyAircraftLocation3D.create()
-                location = locationKey.get()
-                Log.d(TAG, "Method 1 - KeyAircraftLocation3D: ${location?.latitude}, ${location?.longitude}, ${location?.altitude}")
-            } catch (e: Exception) {
-                Log.w(TAG, "Method 1 failed: ${e.message}")
-            }
-            
-            // Method 2: Log if primary method failed
-            if (location == null || (location.latitude == 0.0 && location.longitude == 0.0)) {
-                Log.w(TAG, "Primary GPS method failed or returned zeros")
-                Log.w(TAG, "This usually means the drone doesn't have GPS lock yet")
-            }
-            
-            // Get altitude separately (this is usually more reliable)
-            try {
-                val altKey = FlightControllerKey.KeyAltitude.create()
-                val altValue = altKey.get()
-                altitude = altValue?.toFloat() ?: 0.0f
-                Log.d(TAG, "Got altitude: ${altitude}m")
-                
-                // Override location altitude if we have it
-                if (location != null && altitude > 0) {
-                    location.altitude = altitude.toDouble()
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to get altitude: ${e.message}")
-                altitude = location?.altitude?.toFloat() ?: 0.0f
-            }
-            
-            // Get compass heading (using attitude yaw)
-            try {
-                val attitudeKey = FlightControllerKey.KeyAircraftAttitude.create()
-                val attitude = attitudeKey.get()
-                heading = attitude?.yaw?.toFloat() ?: 0.0f
-                Log.d(TAG, "Got heading: ${heading}°")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to get heading: ${e.message}")
-                heading = 0.0f
-            }
-            
-            // Final validation and return
-            if (location != null && location.latitude != 0.0 && location.longitude != 0.0) {
-                // Only send GPS position to UI occasionally to avoid spam
-                val currentTime = System.currentTimeMillis()
-                if (currentTime % 2000 < CONTROL_LOOP_INTERVAL) { // Every 2 seconds
-                    sendDebugToUI("📡 GPS: lat=${location.latitude.format(6)}, lon=${location.longitude.format(6)}")
-                }
-                return DronePosition(
-                    latitude = location.latitude,
-                    longitude = location.longitude, 
-                    altitude = altitude,
-                    heading = heading
-                )
-            } else {
-                sendDebugToUI("❌ No GPS lock - location: ${location?.latitude}, ${location?.longitude}")
-                
-                // Return zero position - control loop will handle this
-                return DronePosition(
-                    latitude = 0.0,
-                    longitude = 0.0,
-                    altitude = altitude, // At least return altitude if we have it
-                    heading = heading
-                )
-            }
+        val location: LocationCoordinate3D? = try {
+            FlightControllerKey.KeyAircraftLocation3D.create().get()
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Exception getting drone position: ${e.message}", e)
-            return DronePosition(
-                latitude = 0.0,
-                longitude = 0.0,
-                altitude = 0.0f,
-                heading = 0.0f
-            )
+            null
+        }
+        // Altitude separately (barometric, relative to take-off; more reliable than the GPS one).
+        val altitude = try {
+            FlightControllerKey.KeyAltitude.create().get()?.toFloat() ?: 0.0f
+        } catch (e: Exception) {
+            location?.altitude?.toFloat() ?: 0.0f
+        }
+        // Compass heading (using attitude yaw)
+        val heading = try {
+            FlightControllerKey.KeyAircraftAttitude.create().get()?.yaw?.toFloat() ?: 0.0f
+        } catch (e: Exception) {
+            0.0f
+        }
+        val lat = location?.latitude
+        val lon = location?.longitude
+        return if (lat != null && lon != null && lat != 0.0 && lon != 0.0) {
+            DronePosition(latitude = lat, longitude = lon, altitude = altitude, heading = heading)
+        } else {
+            DronePosition(latitude = 0.0, longitude = 0.0, altitude = altitude, heading = heading)
         }
     }
 
@@ -841,11 +743,6 @@ class KMLVirtualStickExecutor(
         val velocityNorth = targetSpeed * cos(bearingRad)
         val velocityEast = targetSpeed * sin(bearingRad)
         
-        // DEBUG: Check if coordinate system needs to be flipped
-        // If drone goes wrong direction, we might need to flip pitch/roll or negate values
-        sendDebugToUI("🔧 DEBUG: bearing=${bearing.format(1)}°, vN=${velocityNorth.format(2)}, vE=${velocityEast.format(2)}")
-        sendDebugToUI("📍 GPS Delta: lat=${(target.latitude - current.latitude).format(6)}, lon=${(target.longitude - current.longitude).format(6)}")
-        
         // Apply velocity limits with less aggressive scaling for better performance
         val distanceScale = if (distance < 3.0) {
             // For very small distances, scale down moderately
@@ -866,15 +763,9 @@ class KMLVirtualStickExecutor(
         // val pitch = -(velocityNorth * distanceScale).coerceIn(-maxSpeed, maxSpeed)
         // val roll = -(velocityEast * distanceScale).coerceIn(-maxSpeed, maxSpeed)
         
-        if (climbing && System.currentTimeMillis() % 1000 < CONTROL_LOOP_INTERVAL) {
-            sendDebugToUI("⬆️ Climbing to ${target.altitude.format(0)}m before moving to WP${currentWaypointIndex + 1}")
-        }
-
         // Safety check: If commands are very small, set to zero to prevent jitter
         val finalPitch = if (climbing || abs(pitch) < 0.1) 0.0 else pitch
         val finalRoll = if (climbing || abs(roll) < 0.1) 0.0 else roll
-        
-        sendDebugToUI("🔄 EXPERIMENTAL: Swapped pitch/roll assignment")
         
         // Calculate vertical velocity with normal responsive control
         val altitudeDifference = target.altitude - current.altitude
@@ -890,13 +781,8 @@ class KMLVirtualStickExecutor(
             else -> -0.5 // Gentle descent if slightly above
         }
         
-        sendDebugToUI("🔺 Altitude: current=${current.altitude.format(1)}m, target=${target.altitude.format(1)}m, diff=${altitudeDifference.format(1)}m, cmd=${verticalVelocity.format(2)}m/s")
-        
-        // POI MODE: Calculate center point of the mission path
+        // POI MODE: face the center point of the mission path (precomputed per route)
         // This assumes a circular/orbital path where drone should always face the center
-        val centerLat = waypoints.map { it.latitude }.average()
-        val centerLon = waypoints.map { it.longitude }.average()
-        
         // Calculate bearing from current position to the center point (POI)
         val bearingToPOI = calculateBearingToPoint(
             current.latitude, current.longitude,
@@ -922,17 +808,6 @@ class KMLVirtualStickExecutor(
             abs(yawAdjustment) > 30.0 -> yawAdjustment.coerceIn(-30.0, 30.0) // Fast rotation
             else -> yawAdjustment * 0.5 // Slow rotation when close to target heading
         }
-        
-        sendDebugToUI("🎯 POI Mode: current=${currentHeading.format(1)}°, POI bearing=${bearingToPOI.format(1)}°, yaw=${yaw.format(1)}°/s")
-        sendDebugToUI("📍 Center: lat=${centerLat.format(6)}, lon=${centerLon.format(6)}")
-        
-        Log.d(TAG, "🧭 Position: Current lat=${current.latitude.format(6)}, lon=${current.longitude.format(6)}")
-        Log.d(TAG, "🎯 Target:   Target  lat=${target.latitude.format(6)}, lon=${target.longitude.format(6)}")
-        Log.d(TAG, "📐 Bearing: ${bearing.format(1)}°, Distance: ${distance.format(1)}m")
-        Log.d(TAG, "⚡ Velocity calc: vNorth=${velocityNorth.format(2)}, vEast=${velocityEast.format(2)}")
-        Log.d(TAG, "📊 Scale factor: distance=${distanceScale.format(2)}, speed=${speedFactor.format(2)}")
-        Log.d(TAG, "🎮 Raw command: pitch=${pitch.format(3)}, roll=${roll.format(3)}")
-        Log.d(TAG, "🎮 Final command: pitch=${finalPitch.format(3)}, roll=${finalRoll.format(3)}, yaw=$yaw, vertical=$verticalVelocity")
         
         val command = VirtualStickFlightControlParam()
         command.pitch = finalPitch
@@ -970,42 +845,30 @@ class KMLVirtualStickExecutor(
         } catch (e: Exception) {
             Log.w(TAG, "Stop command failed: ${e.message}")
         }
-        
-        Log.d(TAG, "Stop command sent")
     }
 
     private fun checkFlightStatusAndProceed(run: Int) {
-        Log.d(TAG, "Checking flight status before starting mission")
-
         // KeyIsFlying, not motors-on: spinning motors on the ground still need a take-off.
         val flying = isFlyingNow()
-        Log.d(TAG, "Current flight mode: ${flightMode()}, is flying: $flying")
-
-        if (!flying) {
-            Log.d(TAG, "Drone is not flying, initiating automatic takeoff")
-            initiateAutomaticTakeoff(run)
-        } else {
-            Log.d(TAG, "Drone is already flying, proceeding with mission")
-            proceedWithMissionStart(run)
-        }
+        Log.i(TAG, "Flying: $flying (mode ${flightMode()})")
+        if (!flying) initiateAutomaticTakeoff(run) else proceedWithMissionStart(run)
     }
     
     private fun initiateAutomaticTakeoff(run: Int) {
-        sendDebugToUI("🚀 Starting automatic takeoff...")
+        Log.i(TAG, "Taking off")
         takingOff = true
         setPhase(PHASE_TAKING_OFF, null)
 
         try {
             FlightControllerKey.KeyStartTakeoff.create().action(
                 onSuccess = { _: EmptyMsg ->
-                    sendDebugToUI("✅ Takeoff started, waiting for DJI to finish it...")
                     scope.launch {
                         if (run != runId || !isExecuting) return@launch
                         controlJob = launch { waitForTakeoff(run) }
                     }
                 },
                 onFailure = { error: IDJIError ->
-                    sendDebugToUI("❌ Takeoff failed: ${error.toString()}")
+                    Log.w(TAG, "Takeoff refused: $error")
                     scope.launch {
                         if (run != runId || !isExecuting) return@launch
                         // DJI refuses a take-off when it is already airborne; that is fine.
@@ -1029,7 +892,7 @@ class KMLVirtualStickExecutor(
                 return fail("${djiModeReason(mode)} during take-off; the route did not start")
             }
             if (isFlyingNow() && mode != FlightMode.AUTO_TAKE_OFF) {
-                sendDebugToUI("🏁 Takeoff complete, starting mission...")
+                Log.i(TAG, "Take-off finished")
                 return proceedWithMissionStart(run)
             }
             if (System.currentTimeMillis() > deadline) return fail("Take-off did not finish")
@@ -1046,8 +909,6 @@ class KMLVirtualStickExecutor(
         if (mode != null && mode in DJI_TAKEOVER_MODES) {
             return fail("${djiModeReason(mode)}; the route did not start")
         }
-        sendDebugToUI("🎯 Starting waypoint navigation mission...")
-        
         // Enable virtual stick mode and start the mission
         enableVirtualStickMode { error ->
             if (run != runId || !isExecuting) {
@@ -1056,7 +917,6 @@ class KMLVirtualStickExecutor(
                 return@enableVirtualStickMode
             }
             if (error != null) {
-                sendDebugToUI("❌ Failed to enable virtual stick mode")
                 return@enableVirtualStickMode fail("Could not take control of the drone: $error")
             }
             if (isPaused) {
@@ -1064,13 +924,9 @@ class KMLVirtualStickExecutor(
                 releaseSticks()
                 return@enableVirtualStickMode
             }
-            sendDebugToUI("🚁 Mission started - control loop active")
             startedReported = true
             callback?.onMissionStarted(KMLMissionManager.MissionType.VIRTUAL_STICK)
             startControlLoop()
         }
     }
-
-    private fun Double.format(decimals: Int): String = "%.${decimals}f".format(this)
-    private fun Float.format(decimals: Int): String = "%.${decimals}f".format(this)
 }
