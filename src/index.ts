@@ -34,6 +34,11 @@ export const confirmLanding = () => ExpoDjiSdkModule.confirmLanding();
 export const isLandingConfirmationNeeded = () => ExpoDjiSdkModule.isLandingConfirmationNeeded();
 
 // Flight Status and Readiness
+/** Latest 1 Hz telemetry snapshot; null before the first connection. */
+export const getTelemetry = () => ExpoDjiSdkModule.getTelemetry();
+/** Battery, GPS, flight mode, position, home and speed once a second while a drone is connected. */
+export const addTelemetryListener = (listener: (telemetry: import('./ExpoDjiSdk.types').DroneTelemetry) => void) =>
+  ExpoDjiSdkModule.addListener('onTelemetry', listener);
 export const getFlightStatus = () => ExpoDjiSdkModule.getFlightStatus();
 export const isReadyForTakeoff = () => ExpoDjiSdkModule.isReadyForTakeoff();
 export const getPreflightReport = () => ExpoDjiSdkModule.getPreflightReport();

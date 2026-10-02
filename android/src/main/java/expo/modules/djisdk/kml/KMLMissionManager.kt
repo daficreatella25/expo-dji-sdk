@@ -26,7 +26,9 @@ data class MissionConfig(
     /** After the last waypoint, fly back to the take-off point (ReturnToStartController). */
     val returnWhenDone: Boolean = false,
     /** With returnWhenDone: land this long after reaching the hover height unless held. 0 = wait for the pilot. */
-    val autoLandAfterMs: Long = 0L
+    val autoLandAfterMs: Long = 0L,
+    /** First waypoint to fly to (0-based, clamped): continue an interrupted route from waypoint N. */
+    val startIndex: Int = 0
 )
 
 class KMLMissionManager(
@@ -73,10 +75,12 @@ class KMLMissionManager(
     }
 
     data class MissionProgress(
-        val currentWaypoint: Int,
+        val currentWaypoint: Int, // absolute index of the waypoint flown to (= waypoints reached)
         val totalWaypoints: Int,
         val progress: Float, // 0.0 to 1.0
-        val distanceToTarget: Double = 0.0
+        val distanceToTarget: Double = 0.0,
+        /** Metres along the route from the drone to the last waypoint (horizontal); null without GPS. */
+        val remainingDistance: Double? = null
     )
 
 
@@ -361,7 +365,10 @@ class KMLMissionManager(
             callback.onMissionPrepared(stats)
 
             // Start virtual stick mission with original waypoints
-            val refused = virtualStickExecutor.startMission(originalWaypoints, tracked, faceCenter = config.faceCenter, climbFirst = config.climbFirst)
+            val refused = virtualStickExecutor.startMission(
+                originalWaypoints, tracked,
+                faceCenter = config.faceCenter, climbFirst = config.climbFirst, startIndex = config.startIndex
+            )
             if (refused != null) {
                 promise.reject("ROUTE_RUNNING", refused, null)
                 return

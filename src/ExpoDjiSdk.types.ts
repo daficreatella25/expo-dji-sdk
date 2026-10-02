@@ -275,6 +275,12 @@ export type KMLMissionConfig = {
   returnWhenDone?: boolean;
   /** With returnWhenDone: land this many ms after reaching the hover height unless held. 0 = wait for the pilot. */
   autoLandAfterMs?: number;
+  /**
+   * First waypoint to fly to, 0-based (clamped to the route): continue an
+   * interrupted route from waypoint N. Take-off and climb-first apply as
+   * usual; progress keeps counting over the whole route. Default 0.
+   */
+  startIndex?: number;
 };
 
 export type KMLMissionStats = {
@@ -285,10 +291,14 @@ export type KMLMissionStats = {
 };
 
 export type KMLMissionProgress = {
+  /** Absolute index of the waypoint flown to (= waypoints reached so far, also with startIndex). */
   currentWaypoint: number;
   totalWaypoints: number;
   progress: number; // 0.0 to 1.0
+  /** Metres to the current waypoint; -1 while waiting for GPS. */
   distanceToTarget?: number;
+  /** Metres along the route from the drone to the last waypoint (horizontal); null while waiting for GPS. */
+  remainingDistance?: number | null;
 };
 
 export type KMLMissionPreview = {
@@ -448,6 +458,38 @@ export type ReturnToStartState = {
   at: number;
 };
 
+/**
+ * onTelemetry, once a second while a drone is connected (getTelemetry returns
+ * the latest). Values DJI does not report are null. When the drone
+ * disconnects, one last snapshot has connected: false with the other values
+ * as last known (it may still be flying).
+ */
+export type DroneTelemetry = {
+  connected: boolean;
+  isFlying: boolean;
+  motorsOn: boolean;
+  /** DJI FlightMode name, e.g. GPS_NORMAL, ATTI, VIRTUAL_STICK, GO_HOME, AUTO_LANDING. */
+  flightMode: string | null;
+  batteryPercent: number | null;
+  gpsSatellites: number | null;
+  /** 0 (none) to 5 (best). */
+  gpsSignalLevel: number | null;
+  /** Metres above the take-off point. */
+  altitude: number | null;
+  /** Horizontal speed, m/s. */
+  speed: number | null;
+  /** Degrees 0-360 from north. */
+  heading: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  /** DJI's recorded take-off point, once set. */
+  home: { latitude: number; longitude: number } | null;
+  /** Metres from the home point. */
+  distanceToHome: number | null;
+  /** Epoch ms of this reading. */
+  at: number;
+};
+
 /** onPhotoDownloadProgress: at most 4 per second, plus one with finished=true per photo. */
 export type PhotoDownloadProgress = {
   sessionId: string;
@@ -500,4 +542,5 @@ export type ExpoDjiSdkModuleEvents = {
   onCompassCalibrationState: (params: CompassCalibrationEvent) => void;
   onReturnToStartEvent: (params: ReturnToStartState) => void;
   onPhotoDownloadProgress: (params: PhotoDownloadProgress) => void;
+  onTelemetry: (params: DroneTelemetry) => void;
 };

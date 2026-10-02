@@ -51,6 +51,10 @@ export declare const isLandingConfirmationNeeded: () => Promise<{
     success: boolean;
     error?: string;
 }>;
+/** Latest 1 Hz telemetry snapshot; null before the first connection. */
+export declare const getTelemetry: () => import("./ExpoDjiSdk.types").DroneTelemetry | null;
+/** Battery, GPS, flight mode, position, home and speed once a second while a drone is connected. */
+export declare const addTelemetryListener: (listener: (telemetry: import("./ExpoDjiSdk.types").DroneTelemetry) => void) => import("expo-modules-core/build/ts-declarations/EventEmitter").EventSubscription;
 export declare const getFlightStatus: () => Promise<import("./ExpoDjiSdk.types").FlightStatus>;
 export declare const isReadyForTakeoff: () => Promise<import("./ExpoDjiSdk.types").ReadinessCheck>;
 export declare const getPreflightReport: () => Promise<import("./ExpoDjiSdk.types").PreflightReport>;

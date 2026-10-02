@@ -31,6 +31,17 @@ import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import android.view.Surface
 import dji.sdk.keyvalue.key.ProductKey
 import dji.sdk.keyvalue.key.FlightControllerKey
+import dji.sdk.keyvalue.key.BatteryKey
+import dji.sdk.keyvalue.value.flightcontroller.GPSSignalLevel
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import dji.v5.et.create
 import dji.v5.et.get
 import dji.v5.et.action
@@ -169,6 +180,13 @@ class ExpoDjiSdkModule : Module() {
   private var keepAliveOn = false
   /** The route's pause (or a disconnect) paused the photo session; its Continue resumes it. */
   @Volatile private var photosHeldByRoute = false
+
+  // 1 Hz drone telemetry while a product is connected (onTelemetry / getTelemetry).
+  private val telemetryScope = CoroutineScope(
+    SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e -> Log.w(TAG, "telemetry: ${e.message}") }
+  )
+  private var telemetryJob: Job? = null
+  @Volatile private var latestTelemetry: Map<String, Any?>? = null
   
   // Camera stream management
   private val cameraStreamManager: ICameraStreamManager
@@ -224,7 +242,7 @@ class ExpoDjiSdkModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress", "onCompassCalibrationState", "onReturnToStartEvent")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress", "onCompassCalibrationState", "onReturnToStartEvent", "onTelemetry")
 
     OnDestroy {
       destroyed = true
@@ -239,6 +257,8 @@ class ExpoDjiSdkModule : Module() {
       }
       returnToStart.dispose()
       setKeepAlive(false)
+      stopTelemetry(disconnected = false)
+      telemetryScope.cancel()
       try {
         VirtualStickManager.getInstance().clearAllVirtualStickStateListener()
       } catch (e: Throwable) {
@@ -334,6 +354,7 @@ class ExpoDjiSdkModule : Module() {
             kmlMissionManager.pauseActiveMission("Drone disconnected", KMLVirtualStickExecutor.SOURCE_DISCONNECT)
             returnToStart.onDisconnected()
             pausePhotoTimer()
+            stopTelemetry(disconnected = true)
             sendEvent("onDroneConnectionChange", mapOf(
               "connected" to false,
               "productId" to productId
@@ -352,6 +373,7 @@ class ExpoDjiSdkModule : Module() {
             setupCameraStreamListener()
             setupFlyToMissionListener()
             getDroneBasicInfo()
+            startTelemetry()
           }
 
           override fun onProductChanged(productId: Int) {
@@ -2544,6 +2566,11 @@ class ExpoDjiSdkModule : Module() {
       returnToStart.state()
     }
 
+    /** Latest 1 Hz snapshot (see onTelemetry); null before the first connection. */
+    Function("getTelemetry") {
+      latestTelemetry
+    }
+
     AsyncFunction("pauseKMLMission") { promise: Promise ->
       kmlMissionManager.pauseMission(promise)
     }
@@ -3177,7 +3204,8 @@ class ExpoDjiSdkModule : Module() {
           "currentWaypoint" to progress.currentWaypoint,
           "totalWaypoints" to progress.totalWaypoints,
           "progress" to progress.progress,
-          "distanceToTarget" to progress.distanceToTarget
+          "distanceToTarget" to progress.distanceToTarget,
+          "remainingDistance" to progress.remainingDistance
         )
       ))
     }
@@ -3321,6 +3349,105 @@ class ExpoDjiSdkModule : Module() {
     if (on) FlightKeepAliveService.start(ctx) else FlightKeepAliveService.stop(ctx)
   }
 
+  private fun startTelemetry() {
+    synchronized(telemetryScope) {
+      telemetryJob?.cancel()
+      telemetryJob = telemetryScope.launch {
+        while (isActive) {
+          val snapshot = try {
+            readTelemetry()
+          } catch (e: Exception) {
+            Log.w(TAG, "telemetry read failed: ${e.message}")
+            null
+          }
+          if (snapshot != null) {
+            latestTelemetry = snapshot
+            safeSend("onTelemetry", snapshot)
+          }
+          delay(1000L)
+        }
+      }
+    }
+  }
+
+  /**
+   * Stops the loop. On a disconnect, one last snapshot says connected: false;
+   * the other values stay the last known ones (the drone may well still fly).
+   */
+  private fun stopTelemetry(disconnected: Boolean) {
+    synchronized(telemetryScope) {
+      telemetryJob?.cancel()
+      telemetryJob = null
+    }
+    if (disconnected) {
+      val last = latestTelemetry ?: return
+      val snapshot = last + mapOf("connected" to false, "at" to System.currentTimeMillis().toDouble())
+      latestTelemetry = snapshot
+      safeSend("onTelemetry", snapshot)
+    }
+  }
+
+  /** One read of everything the pilot's HUD needs; any value DJI does not have is null. */
+  private fun readTelemetry(): Map<String, Any?> {
+    fun <T> read(block: () -> T?): T? = try { block() } catch (e: Throwable) { null }
+    val location = read { FlightControllerKey.KeyAircraftLocation3D.create().get() }
+      ?.takeIf { it.latitude != null && it.longitude != null && !(it.latitude == 0.0 && it.longitude == 0.0) }
+    val homeSet = read { FlightControllerKey.KeyIsHomeLocationSet.create().get() } == true
+    val home = if (homeSet) {
+      read { FlightControllerKey.KeyHomeLocation.create().get() }
+        ?.takeIf { it.latitude != null && it.longitude != null && !(it.latitude == 0.0 && it.longitude == 0.0) }
+    } else null
+    val velocity = read { FlightControllerKey.KeyAircraftVelocity.create().get() }
+    val speed = velocity?.let { v ->
+      val north = v.x ?: return@let null
+      val east = v.y ?: return@let null
+      kotlin.math.sqrt(north * north + east * east)
+    }
+    val heading = (read { FlightControllerKey.KeyCompassHeading.create().get() }
+      ?: read { FlightControllerKey.KeyAircraftAttitude.create().get()?.yaw })
+      ?.let { ((it % 360.0) + 360.0) % 360.0 }
+    val distanceToHome = if (location != null && home != null) {
+      distanceMeters(location.latitude, location.longitude, home.latitude, home.longitude)
+    } else null
+    return mapOf(
+      "connected" to isProductConnected,
+      "isFlying" to (read { FlightControllerKey.KeyIsFlying.create().get() } == true),
+      "motorsOn" to (read { FlightControllerKey.KeyAreMotorsOn.create().get() } == true),
+      "flightMode" to read { FlightControllerKey.KeyFlightMode.create().get() }?.name,
+      "batteryPercent" to read { BatteryKey.KeyChargeRemainingInPercent.create().get() },
+      "gpsSatellites" to read { FlightControllerKey.KeyGPSSatelliteCount.create().get() },
+      "gpsSignalLevel" to read { FlightControllerKey.KeyGPSSignalLevel.create().get() }?.let { gpsLevelNumber(it) },
+      "altitude" to read { FlightControllerKey.KeyAltitude.create().get() },
+      "speed" to speed,
+      "heading" to heading,
+      "latitude" to location?.latitude,
+      "longitude" to location?.longitude,
+      "home" to home?.let { mapOf("latitude" to it.latitude, "longitude" to it.longitude) },
+      "distanceToHome" to distanceToHome,
+      "at" to System.currentTimeMillis().toDouble(),
+    )
+  }
+
+  /** DJI's signal level as 0-5 (LEVEL_10, RTK-grade, counts as 5); null when unknown. */
+  private fun gpsLevelNumber(level: GPSSignalLevel): Int? = when (level) {
+    GPSSignalLevel.LEVEL_0, GPSSignalLevel.LEVEL_NONE -> 0
+    GPSSignalLevel.LEVEL_1 -> 1
+    GPSSignalLevel.LEVEL_2 -> 2
+    GPSSignalLevel.LEVEL_3 -> 3
+    GPSSignalLevel.LEVEL_4 -> 4
+    GPSSignalLevel.LEVEL_5, GPSSignalLevel.LEVEL_10 -> 5
+    else -> null
+  }
+
+  private fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+    val dLat = Math.toRadians(lat2 - lat1)
+    val dLon = Math.toRadians(lon2 - lon1)
+    val a = kotlin.math.sin(dLat / 2) * kotlin.math.sin(dLat / 2) +
+      kotlin.math.cos(Math.toRadians(lat1)) * kotlin.math.cos(Math.toRadians(lat2)) *
+      kotlin.math.sin(dLon / 2) * kotlin.math.sin(dLon / 2)
+    return 6371000 * 2 * kotlin.math.atan2(kotlin.math.sqrt(a), kotlin.math.sqrt(1 - a))
+  }
+
   /** sendEvent from control-loop threads; never throws into them, silent after destroy. */
   private fun safeSend(name: String, body: Map<String, Any?>) {
     if (destroyed) return
@@ -3340,7 +3467,8 @@ class ExpoDjiSdkModule : Module() {
       faceCenter = options["faceCenter"] as? Boolean ?: false,
       climbFirst = options["climbFirst"] as? Boolean ?: true,
       returnWhenDone = options["returnWhenDone"] as? Boolean ?: false,
-      autoLandAfterMs = (options["autoLandAfterMs"] as? Number)?.toLong() ?: 0L
+      autoLandAfterMs = (options["autoLandAfterMs"] as? Number)?.toLong() ?: 0L,
+      startIndex = (options["startIndex"] as? Number)?.toInt() ?: 0
     )
   }
   

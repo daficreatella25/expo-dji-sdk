@@ -117,6 +117,8 @@ class KMLVirtualStickExecutor(
     private var controlJob: Job? = null
     @Volatile private var callback: KMLMissionManager.KMLMissionCallback? = null
     private var waypoints: List<KMLWaypoint> = emptyList()
+    /** Metres along the route from waypoint i to the last one (horizontal). */
+    private var routeAfter: DoubleArray = DoubleArray(0)
     private var faceCenter = false
     private var climbFirst = true
     private var startedReported = false
@@ -161,14 +163,17 @@ class KMLVirtualStickExecutor(
         get() = currentWaypointIndex
 
     /**
-     * Starts the route (take-off first when on the ground). Returns null when
-     * accepted, otherwise why it was refused; nothing is flown then.
+     * Starts the route (take-off first when on the ground), flying first to
+     * waypoint [startIndex] (0-based, clamped; to continue an interrupted
+     * route). Returns null when accepted, otherwise why it was refused;
+     * nothing is flown then.
      */
     fun startMission(
         kmlWaypoints: List<KMLWaypoint>,
         callback: KMLMissionManager.KMLMissionCallback,
         faceCenter: Boolean = false,
-        climbFirst: Boolean = true
+        climbFirst: Boolean = true,
+        startIndex: Int = 0
     ): String? {
         if (kmlWaypoints.isEmpty()) return "The route has no waypoints"
         if (ending) return "The previous route is still handing back control; try again in a moment"
@@ -176,12 +181,18 @@ class KMLVirtualStickExecutor(
             Log.w(TAG, "Mission already executing")
             return "A route is already running"
         }
+        val firstIndex = startIndex.coerceIn(0, kmlWaypoints.size - 1)
         isExecuting = true
         isPaused = false
-        currentWaypointIndex = 0
+        // Absolute numbers throughout: progress for a continued route counts from the full route.
+        currentWaypointIndex = firstIndex
         scope.launch {
             runId++
             this@KMLVirtualStickExecutor.waypoints = kmlWaypoints
+            routeAfter = DoubleArray(kmlWaypoints.size).also { after ->
+                for (i in kmlWaypoints.size - 2 downTo 0) after[i] = after[i + 1] + distanceBetween(kmlWaypoints[i], kmlWaypoints[i + 1])
+            }
+            if (firstIndex > 0) Log.i(TAG, "Continuing the route from waypoint ${firstIndex + 1}/${kmlWaypoints.size}")
             this@KMLVirtualStickExecutor.callback = callback
             this@KMLVirtualStickExecutor.faceCenter = faceCenter
             this@KMLVirtualStickExecutor.climbFirst = climbFirst
@@ -513,7 +524,8 @@ class KMLVirtualStickExecutor(
                     currentWaypoint = currentWaypointIndex,
                     totalWaypoints = waypoints.size,
                     progress = currentWaypointIndex.toFloat() / waypoints.size.toFloat(),
-                    distanceToTarget = -1.0 // Special value to indicate GPS lock wait
+                    distanceToTarget = -1.0, // Special value to indicate GPS lock wait
+                    remainingDistance = null
                 )
             )
             return
@@ -544,12 +556,16 @@ class KMLVirtualStickExecutor(
 
             // Update progress
             val progress = currentWaypointIndex.toFloat() / waypoints.size.toFloat()
+            val remaining = if (currentWaypointIndex < waypoints.size) {
+                calculateHorizontalDistance(currentPosition, waypoints[currentWaypointIndex]) + routeAfter[currentWaypointIndex]
+            } else 0.0
             callback?.onMissionProgress(
                 KMLMissionManager.MissionProgress(
                     currentWaypoint = currentWaypointIndex,
                     totalWaypoints = waypoints.size,
                     progress = progress,
-                    distanceToTarget = 0.0
+                    distanceToTarget = 0.0,
+                    remainingDistance = remaining
                 )
             )
 
@@ -590,7 +606,8 @@ class KMLVirtualStickExecutor(
                 currentWaypoint = currentWaypointIndex,
                 totalWaypoints = waypoints.size,
                 progress = progress,
-                distanceToTarget = horizontalDistance
+                distanceToTarget = horizontalDistance,
+                remainingDistance = horizontalDistance + routeAfter[currentWaypointIndex]
             )
         )
     }
@@ -758,6 +775,14 @@ class KMLVirtualStickExecutor(
         val c = 2 * atan2(sqrt(a), sqrt(1 - a))
 
         return 6371000 * c // Earth radius in meters
+    }
+
+    private fun distanceBetween(a: KMLWaypoint, b: KMLWaypoint): Double {
+        val dLat = Math.toRadians(b.latitude - a.latitude)
+        val dLon = Math.toRadians(b.longitude - a.longitude)
+        val h = sin(dLat / 2) * sin(dLat / 2) +
+                cos(Math.toRadians(a.latitude)) * cos(Math.toRadians(b.latitude)) * sin(dLon / 2) * sin(dLon / 2)
+        return 6371000 * 2 * atan2(sqrt(h), sqrt(1 - h))
     }
 
     private fun calculateBearing(current: DronePosition, target: KMLWaypoint): Double {

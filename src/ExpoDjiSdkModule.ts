@@ -28,6 +28,7 @@ import {
   KMLMissionResult,
   KMLMissionStatus,
   ReturnToStartState,
+  DroneTelemetry,
 } from './ExpoDjiSdk.types';
 
 declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
@@ -60,6 +61,8 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   isLandingConfirmationNeeded(): Promise<{ isNeeded: boolean; success: boolean; error?: string }>;
   
   // Flight Status and Readiness
+  /** Latest 1 Hz telemetry snapshot (onTelemetry); null before the first connection. */
+  getTelemetry(): DroneTelemetry | null;
   getFlightStatus(): Promise<FlightStatus>;
   isReadyForTakeoff(): Promise<ReadinessCheck>;
   getPreflightReport(): Promise<PreflightReport>;
