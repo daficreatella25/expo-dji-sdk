@@ -1,2 +1,17 @@
-<manifest>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- FlightKeepAliveService: keeps routes and returns running with the screen off. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- Android 14+ only starts a connectedDevice foreground service when the app
+       holds one of a few permissions; this one is granted at install. -->
+  <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+
+  <application>
+    <service
+      android:name=".FlightKeepAliveService"
+      android:exported="false"
+      android:foregroundServiceType="connectedDevice" />
+  </application>
 </manifest>

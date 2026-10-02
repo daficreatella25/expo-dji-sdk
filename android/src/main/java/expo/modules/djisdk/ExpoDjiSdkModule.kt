@@ -1,6 +1,8 @@
 package expo.modules.djisdk
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import dji.v5.common.error.IDJIError
 import dji.v5.common.register.DJISDKInitEvent
@@ -91,6 +93,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
 import expo.modules.djisdk.kml.KMLMissionManager
+import expo.modules.djisdk.kml.KMLVirtualStickExecutor
 import expo.modules.djisdk.kml.MissionConfig as KMLMissionConfig
 
 class ExpoDjiSdkModule : Module() {
@@ -143,14 +146,27 @@ class ExpoDjiSdkModule : Module() {
   private val context: Context
     get() = requireNotNull(appContext.reactContext)
   
-  private var isProductConnected = false
-  private var currentVirtualStickState: VirtualStickState? = null
+  @Volatile private var isProductConnected = false
+  // Read by the route and return control loops on their own threads.
+  @Volatile private var currentVirtualStickState: VirtualStickState? = null
   private var currentProductId: Int = -1
-  private val kmlMissionManager = KMLMissionManager()
-  private val returnToStart = ReturnToStartController(
-    emit = { state -> sendEvent("onReturnToStartEvent", state) },
+  private val kmlMissionManager = KMLMissionManager(
     isVirtualStickEnabled = { currentVirtualStickState?.isVirtualStickEnable },
   )
+  private val returnToStart = ReturnToStartController(
+    emit = { state ->
+      safeSend("onReturnToStartEvent", state)
+      updateKeepAlive()
+    },
+    isVirtualStickEnabled = { currentVirtualStickState?.isVirtualStickEnable },
+  )
+  private val mainHandler = Handler(Looper.getMainLooper())
+  /** The auto-return queued by a finished route (cancelled on destroy). */
+  @Volatile private var pendingAutoReturn: Runnable? = null
+  /** A finished route asked for a return that has not taken the sticks yet. */
+  @Volatile private var autoReturnPending = false
+  @Volatile private var destroyed = false
+  private var keepAliveOn = false
   
   // Camera stream management
   private val cameraStreamManager: ICameraStreamManager
@@ -207,7 +223,18 @@ class ExpoDjiSdkModule : Module() {
     Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress", "onCompassCalibrationState", "onReturnToStartEvent")
 
     OnDestroy {
+      destroyed = true
+      // Nothing may keep flying on logic whose JS side is gone.
+      pendingAutoReturn?.let { mainHandler.removeCallbacks(it) }
+      pendingAutoReturn = null
+      autoReturnPending = false
+      try {
+        kmlMissionManager.stopActiveMission()
+      } catch (e: Throwable) {
+        Log.w(TAG, "OnDestroy: stopping the route failed: ${e.message}")
+      }
       returnToStart.dispose()
+      setKeepAlive(false)
       try {
         VirtualStickManager.getInstance().clearAllVirtualStickStateListener()
       } catch (e: Throwable) {
@@ -297,6 +324,12 @@ class ExpoDjiSdkModule : Module() {
             unwatchCompassCalibration()
             currentVirtualStickState = null
             currentProductId = -1
+            // Without a link nothing reaches the drone and DJI's failsafe flies it.
+            // Hold the route, the return and the shutter so nothing carries on by
+            // itself when the link comes back.
+            kmlMissionManager.pauseActiveMission("Drone disconnected", KMLVirtualStickExecutor.SOURCE_DISCONNECT)
+            returnToStart.onDisconnected()
+            stopPhotoTimer()
             sendEvent("onDroneConnectionChange", mapOf(
               "connected" to false,
               "productId" to productId
@@ -376,6 +409,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("enableVirtualStick") { promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         VirtualStickManager.getInstance().enableVirtualStick(object : CommonCallbacks.CompletionCallback {
           override fun onSuccess() {
@@ -392,6 +426,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("disableVirtualStick") { promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         VirtualStickManager.getInstance().disableVirtualStick(object : CommonCallbacks.CompletionCallback {
           override fun onSuccess() {
@@ -797,6 +832,7 @@ class ExpoDjiSdkModule : Module() {
 
     // Virtual Stick Control Methods
     AsyncFunction("sendVirtualStickCommand") { leftX: Double, leftY: Double, rightX: Double, rightY: Double, promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         if (!isProductConnected) {
           promise.reject("NOT_CONNECTED", "No drone connected", null)
@@ -870,6 +906,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("setVirtualStickModeEnabled") { enabled: Boolean, promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         if (enabled) {
           VirtualStickManager.getInstance().enableVirtualStick(object : CommonCallbacks.CompletionCallback {
@@ -949,6 +986,7 @@ class ExpoDjiSdkModule : Module() {
       verticalMode: String, 
       coordinateSystem: String, 
       promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         val rollPitchControlMode = when(rollPitchMode.uppercase()) {
           "VELOCITY" -> RollPitchControlMode.VELOCITY
@@ -993,6 +1031,7 @@ class ExpoDjiSdkModule : Module() {
 
     // Takeoff and Landing Methods
     AsyncFunction("startTakeoff") { promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         if (!isProductConnected) {
           promise.reject("NOT_CONNECTED", "No drone connected", null)
@@ -1021,6 +1060,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("startLanding") { promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         if (!isProductConnected) {
           promise.reject("NOT_CONNECTED", "No drone connected", null)
@@ -1049,6 +1089,7 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("cancelLanding") { promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         if (!isProductConnected) {
           promise.reject("NOT_CONNECTED", "No drone connected", null)
@@ -1524,6 +1565,7 @@ class ExpoDjiSdkModule : Module() {
 
     // Intelligent Flight - FlyTo Mission
     AsyncFunction("startFlyToMission") { latitude: Double, longitude: Double, altitude: Double, maxSpeed: Int, promise: Promise ->
+      if (rejectIfFlightBusy(promise)) return@AsyncFunction
       try {
         if (!isProductConnected) {
           promise.reject("NOT_CONNECTED", "No drone connected", null)
@@ -2381,10 +2423,7 @@ class ExpoDjiSdkModule : Module() {
 
     // KML Mission Methods
     AsyncFunction("importKMLMission") { kmlFilePath: String, options: Map<String, Any>?, promise: Promise ->
-      if (returnToStart.isActive) {
-        promise.reject("RETURN_IN_PROGRESS", "Return to start is in progress; finish or cancel it first", null)
-        return@AsyncFunction
-      }
+      if (rejectIfRouteBlocked(promise)) return@AsyncFunction
       try {
         val config = parseKMLMissionConfig(options ?: emptyMap())
         
@@ -2407,8 +2446,9 @@ class ExpoDjiSdkModule : Module() {
     }
 
     AsyncFunction("importKMLMissionFromContent") { kmlContent: String, options: Map<String, Any>?, promise: Promise ->
-      if (returnToStart.isActive) {
-        promise.reject("RETURN_IN_PROGRESS", "Return to start is in progress; finish or cancel it first", null)
+      if (rejectIfRouteBlocked(promise)) return@AsyncFunction
+      if (!isProductConnected) {
+        promise.reject("NOT_CONNECTED", "No drone connected", null)
         return@AsyncFunction
       }
       try {
@@ -2417,6 +2457,7 @@ class ExpoDjiSdkModule : Module() {
         val callback = kmlMissionCallback(config)
 
         kmlMissionManager.importAndExecuteKMLFromContent(kmlContent, config, callback, promise)
+        updateKeepAlive()
         
       } catch (e: Exception) {
         Log.e(TAG, "Failed to import KML mission from content: ${e.message}", e)
@@ -2433,15 +2474,14 @@ class ExpoDjiSdkModule : Module() {
         return@AsyncFunction
       }
       // A running route would fight over the sticks: stop it (as "stopped", not
-      // completed) and let its stick release finish before the return takes them.
-      val stoppedRoute = kmlMissionManager.stopActiveMission()
+      // completed) and start the return once its stick release has finished.
       val begin = {
         returnToStart.start(autoLandAfterMs = autoLandAfterMs) { error ->
           if (error == null) promise.resolve(returnToStart.state())
           else promise.reject("RETURN_ERROR", error, null)
         }
       }
-      if (stoppedRoute) android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ begin() }, 1000L) else begin()
+      if (!kmlMissionManager.stopActiveMission(onReleased = { begin() })) begin()
     }
 
     AsyncFunction("pauseReturnToStart") { promise: Promise ->
@@ -3076,7 +3116,7 @@ class ExpoDjiSdkModule : Module() {
   /** Forwards route events to JS; a finished route can hand over to return-to-start. */
   private fun kmlMissionCallback(config: expo.modules.djisdk.kml.MissionConfig) = object : KMLMissionManager.KMLMissionCallback {
     override fun onMissionPrepared(stats: expo.modules.djisdk.kml.MissionStats) {
-      sendEvent("onKMLMissionEvent", mapOf(
+      safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionPrepared",
         "data" to mapOf(
           "totalDistance" to stats.totalDistance,
@@ -3088,14 +3128,22 @@ class ExpoDjiSdkModule : Module() {
     }
 
     override fun onMissionStarted(type: KMLMissionManager.MissionType) {
-      sendEvent("onKMLMissionEvent", mapOf(
+      safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionStarted",
         "missionType" to type.name.lowercase()
       ))
     }
 
+    override fun onMissionPhase(phase: String, targetAltitude: Double?) {
+      safeSend("onKMLMissionEvent", mapOf(
+        "type" to "missionPhase",
+        "phase" to phase,
+        "targetAltitude" to targetAltitude
+      ))
+    }
+
     override fun onMissionProgress(progress: KMLMissionManager.MissionProgress) {
-      sendEvent("onKMLMissionEvent", mapOf(
+      safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionProgress",
         "data" to mapOf(
           "currentWaypoint" to progress.currentWaypoint,
@@ -3110,54 +3158,133 @@ class ExpoDjiSdkModule : Module() {
       // The route's photos are done; stop the interval shutter here too, in
       // case JS is asleep (screen off) and would keep it shooting on the way home.
       photoManager.stopSession()
-      sendEvent("onKMLMissionEvent", mapOf(
+      // Fires after the route released the sticks, so the return can take them now.
+      if (config.returnWhenDone) startReturnAfterRoute(config.autoLandAfterMs)
+      safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionCompleted",
         "returning" to config.returnWhenDone
       ))
-      if (config.returnWhenDone) startReturnAfterRoute(config.autoLandAfterMs)
+      updateKeepAlive()
     }
 
     override fun onMissionFailed(error: String) {
-      sendEvent("onKMLMissionEvent", mapOf(
+      stopPhotoTimer()
+      safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionFailed",
         "error" to error
       ))
+      updateKeepAlive()
     }
 
-    override fun onMissionPaused() {
-      sendEvent("onKMLMissionEvent", mapOf(
-        "type" to "missionPaused"
+    override fun onMissionPaused(reason: String?, source: String) {
+      // Lost control, DJI's own return/landing, disconnect...: no photos while
+      // the pilot flies, even with JS asleep.
+      stopPhotoTimer()
+      safeSend("onKMLMissionEvent", mapOf(
+        "type" to "missionPaused",
+        "reason" to reason,
+        "source" to source
       ))
     }
 
     override fun onMissionResumed() {
-      sendEvent("onKMLMissionEvent", mapOf(
+      safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionResumed"
       ))
     }
 
     override fun onMissionStopped() {
       photoManager.stopSession()
-      sendEvent("onKMLMissionEvent", mapOf(
+      safeSend("onKMLMissionEvent", mapOf(
         "type" to "missionStopped"
       ))
+      updateKeepAlive()
     }
   }
 
   /**
-   * The route released the sticks a moment ago; give that a second to settle
-   * (the drone hovers on its own meanwhile), then fly home. Done here rather
-   * than in JS so it still happens with the phone screen off.
+   * The route has released the sticks (the drone hovers on its own); fly home.
+   * Done here rather than in JS so it still happens with the phone screen off.
    */
   private fun startReturnAfterRoute(autoLandAfterMs: Long) {
-    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-      returnToStart.start(autoLandAfterMs = autoLandAfterMs, afterRoute = true) { error ->
-        if (error != null) {
-          Log.w(TAG, "return after route: $error")
-          sendEvent("onKMLMissionEvent", mapOf("type" to "autoReturnFailed", "error" to error))
-        }
+    if (destroyed) return
+    autoReturnPending = true
+    val start = Runnable {
+      pendingAutoReturn = null
+      if (destroyed) {
+        autoReturnPending = false
+        return@Runnable
       }
-    }, 1000L)
+      returnToStart.start(autoLandAfterMs = autoLandAfterMs, afterRoute = true) { error ->
+        autoReturnPending = false
+        // "Already running": the pilot started one first; that return carries on.
+        if (error != null && error != ReturnToStartController.ALREADY_RUNNING) {
+          Log.w(TAG, "return after route: $error")
+          safeSend("onKMLMissionEvent", mapOf("type" to "autoReturnFailed", "error" to error))
+        }
+        updateKeepAlive()
+      }
+    }
+    pendingAutoReturn = start
+    mainHandler.post(start)
+  }
+
+  /** Raw stick, take-off and landing calls would fight a running route or return. */
+  private fun rejectIfFlightBusy(promise: Promise): Boolean {
+    val reason = when {
+      kmlMissionManager.isRouteBusy -> "A route is running; pause or end it first"
+      returnToStart.isActive || autoReturnPending -> "Return to start is in progress; finish or cancel it first"
+      else -> return false
+    }
+    promise.reject("BUSY", reason, null)
+    return true
+  }
+
+  /** One route at a time, and none while the drone is flying home. */
+  private fun rejectIfRouteBlocked(promise: Promise): Boolean {
+    when {
+      kmlMissionManager.isRouteBusy ->
+        promise.reject("ROUTE_RUNNING", "A route is already running; pause or end it first", null)
+      returnToStart.isActive || autoReturnPending ->
+        promise.reject("RETURN_IN_PROGRESS", "Return to start is in progress; finish or cancel it first", null)
+      else -> return false
+    }
+    return true
+  }
+
+  /** Stops the interval shutter (route paused, failed, or the drone disconnected). */
+  private fun stopPhotoTimer() {
+    try {
+      photoManager.stopSession()
+    } catch (e: Throwable) {
+      Log.w(TAG, "stopping the photo timer failed: ${e.message}")
+    }
+  }
+
+  /** Keeps the process (and so the control loops) alive while a route or a return flies the drone. */
+  private fun updateKeepAlive() {
+    setKeepAlive(!destroyed && (kmlMissionManager.isRouteBusy || returnToStart.isActive || autoReturnPending))
+  }
+
+  private fun setKeepAlive(on: Boolean) {
+    synchronized(this) {
+      if (on == keepAliveOn) return
+      keepAliveOn = on
+    }
+    val ctx = appContext.reactContext?.applicationContext
+      ?: try { ContextUtil.getContext() } catch (_: Throwable) { null }
+      ?: return
+    if (on) FlightKeepAliveService.start(ctx) else FlightKeepAliveService.stop(ctx)
+  }
+
+  /** sendEvent from control-loop threads; never throws into them, silent after destroy. */
+  private fun safeSend(name: String, body: Map<String, Any?>) {
+    if (destroyed) return
+    try {
+      sendEvent(name, body)
+    } catch (e: Throwable) {
+      Log.w(TAG, "sendEvent $name failed: ${e.message}")
+    }
   }
 
   private fun parseKMLMissionConfig(options: Map<String, Any>): expo.modules.djisdk.kml.MissionConfig {

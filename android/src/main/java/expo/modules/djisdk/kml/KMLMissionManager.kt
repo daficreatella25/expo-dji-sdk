@@ -7,6 +7,9 @@ import android.net.Uri
 import expo.modules.kotlin.Promise
 import dji.v5.manager.aircraft.waypoint3.WaypointMissionManager
 import dji.v5.utils.common.ContextUtil
+import dji.sdk.keyvalue.key.FlightControllerKey
+import dji.v5.et.create
+import dji.v5.et.get
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -26,9 +29,16 @@ data class MissionConfig(
     val autoLandAfterMs: Long = 0L
 )
 
-class KMLMissionManager {
+class KMLMissionManager(
+    /** Latest virtual-stick state from the module's listener; null when unknown. */
+    isVirtualStickEnabled: () -> Boolean?
+) {
     companion object {
         private const val TAG = "KMLMissionManager"
+        /** Lowest waypoint the executor will fly to (m above the take-off point). */
+        private const val MIN_WAYPOINT_ALTITUDE = 5.0
+        /** When the drone's own height limit cannot be read. */
+        private const val DEFAULT_HEIGHT_LIMIT = 120.0
     }
 
     private val kmlParser = KMLParser()
@@ -37,9 +47,9 @@ class KMLMissionManager {
     private val waypointConverter = KMLToWaypointConverter()
     private val missionCreator = DJIWaypointMissionCreator()
     private val litchiStyleCreator = LitchiStyleMissionCreator()
-    private val virtualStickExecutor = KMLVirtualStickExecutor()
+    private val virtualStickExecutor = KMLVirtualStickExecutor(isVirtualStickEnabled)
     
-    private var currentMissionType: MissionType = MissionType.NONE
+    @Volatile private var currentMissionType: MissionType = MissionType.NONE
     private var missionCallback: KMLMissionCallback? = null
 
     enum class MissionType {
@@ -50,12 +60,16 @@ class KMLMissionManager {
         fun onMissionPrepared(stats: MissionStats)
         fun onMissionStarted(type: MissionType)
         fun onMissionProgress(progress: MissionProgress)
+        /** Completed, stopped and failed fire once per route, after its sticks were released. */
         fun onMissionCompleted()
         fun onMissionFailed(error: String)
-        fun onMissionPaused()
+        /** [source]: KMLVirtualStickExecutor.SOURCE_* (app, lostControl, djiMode, disconnect, stuck, gps). */
+        fun onMissionPaused(reason: String?, source: String)
         fun onMissionResumed()
         /** Stopped before the last waypoint (by the pilot or a return to start). */
         fun onMissionStopped() {}
+        /** KMLVirtualStickExecutor.PHASE_*, on change; [targetAltitude] while climbing. */
+        fun onMissionPhase(phase: String, targetAltitude: Double?) {}
     }
 
     data class MissionProgress(
@@ -66,59 +80,18 @@ class KMLMissionManager {
     )
 
 
+    /**
+     * The file-path import only converted the KML and reported an on-board
+     * (WPMZ) mission as started without flying anything. Refused: routes are
+     * flown with importAndExecuteKMLFromContent (virtual sticks).
+     */
     fun importAndExecuteKML(
         kmlFilePath: String,
         config: MissionConfig,
         callback: KMLMissionCallback,
         promise: Promise
     ) {
-        this.missionCallback = callback
-
-        try {
-            // Step 1: Parse KML file (path should already be accessible)
-            Log.d(TAG, "Attempting to parse KML file at: $kmlFilePath")
-            val kmlFile = File(kmlFilePath)
-            if (!kmlFile.exists()) {
-                Log.e(TAG, "KML file does not exist at: $kmlFilePath")
-                promise.reject("FILE_NOT_FOUND", "KML file not found at: $kmlFilePath", null)
-                return
-            }
-
-            val kmlMission = kmlParser.parseKMLFile(kmlFilePath)
-            Log.d(TAG, "Parsed ${kmlMission.waypoints.size} waypoints from KML")
-
-            if (kmlMission.waypoints.isEmpty()) {
-                promise.reject("PARSE_ERROR", "No waypoints found in KML file", null)
-                return
-            }
-
-            // Step 2: Optimize waypoints
-            val optimizedWaypoints = optimizer.optimizeWaypoints(kmlMission.waypoints)
-            val stats = optimizer.calculateMissionStats(optimizedWaypoints)
-            callback.onMissionPrepared(stats)
-
-            // Step 3: Convert KML to KMZ using existing system
-            val kmzPath = convertKMLToKMZ(kmlFilePath)
-            if (kmzPath.isEmpty()) {
-                promise.reject("CONVERSION_ERROR", "Failed to convert KML to KMZ format", null)
-                return
-            }
-
-            // Step 4: Use existing waypoint mission system
-            currentMissionType = MissionType.WPMZ_MISSION
-            callback.onMissionStarted(MissionType.WPMZ_MISSION)
-
-            promise.resolve(mapOf(
-                "success" to true,
-                "missionType" to "wpmz",
-                "waypoints" to optimizedWaypoints.size,
-                "kmzPath" to kmzPath
-            ))
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error importing KML: ${e.message}")
-            promise.reject("IMPORT_ERROR", "Failed to import KML: ${e.message}", null)
-        }
+        promise.reject("NOT_SUPPORTED", "Importing a route from a file path is not supported; send the KML content instead", null)
     }
 
     private fun convertKMLToKMZ(kmlFilePath: String): String {
@@ -155,82 +128,115 @@ class KMLMissionManager {
         }
     }
 
+    val isRouteRunning: Boolean
+        get() = virtualStickExecutor.isRunning
+
+    /** Running, or ended a moment ago and still handing the sticks back. */
+    val isRouteBusy: Boolean
+        get() = virtualStickExecutor.isBusy
+
     fun pauseMission(promise: Promise) {
-        when (currentMissionType) {
-            MissionType.WPMZ_MISSION -> {
-                // Not wired to WaypointMissionManager: refuse rather than report a pause that did not happen.
-                promise.reject("NOT_SUPPORTED", "Pausing on-board waypoint missions is not supported; use the remote's pause button", null)
-            }
-            MissionType.VIRTUAL_STICK -> {
-                try {
-                    Log.d(TAG, "Pausing virtual stick mission")
-                    virtualStickExecutor.pauseMission()
-                    promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission paused, RC control enabled"))
-                } catch (e: Exception) {
-                    promise.reject("PAUSE_ERROR", "Failed to pause virtual stick mission: ${e.message}", null)
-                }
-            }
-            MissionType.NONE -> {
-                promise.reject("NO_MISSION", "No mission is currently running", null)
-            }
+        if (!virtualStickExecutor.isRunning) {
+            promise.reject("NO_MISSION", "No mission is currently running", null)
+            return
+        }
+        Log.d(TAG, "Pausing virtual stick mission")
+        virtualStickExecutor.pauseMission("Paused from the app", KMLVirtualStickExecutor.SOURCE_APP) { error ->
+            if (error == null) promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission paused, RC control enabled"))
+            else promise.resolve(mapOf("success" to false, "message" to error))
         }
     }
 
     fun resumeMission(promise: Promise) {
-        when (currentMissionType) {
-            MissionType.WPMZ_MISSION -> {
-                promise.reject("NOT_SUPPORTED", "Resuming on-board waypoint missions is not supported", null)
-            }
-            MissionType.VIRTUAL_STICK -> {
-                try {
-                    Log.d(TAG, "Resuming virtual stick mission")
-                    virtualStickExecutor.resumeMission()
-                    promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission resumed"))
-                } catch (e: Exception) {
-                    promise.reject("RESUME_ERROR", "Failed to resume virtual stick mission: ${e.message}", null)
-                }
-            }
-            MissionType.NONE -> {
-                promise.reject("NO_MISSION", "No mission is currently running", null)
-            }
+        if (!virtualStickExecutor.isRunning) {
+            promise.reject("NO_MISSION", "No mission is currently running", null)
+            return
+        }
+        Log.d(TAG, "Resuming virtual stick mission")
+        // Resolves once the sticks are taken again (or with the reason it cannot continue).
+        virtualStickExecutor.resumeMission { error ->
+            if (error == null) promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission resumed"))
+            else promise.resolve(mapOf("success" to false, "message" to error))
         }
     }
 
     fun stopMission(promise: Promise) {
-        when (currentMissionType) {
-            MissionType.WPMZ_MISSION -> {
-                promise.reject("NOT_SUPPORTED", "Stopping on-board waypoint missions is not supported; use the remote's pause button", null)
-            }
-            MissionType.VIRTUAL_STICK -> {
-                try {
-                    Log.d(TAG, "Stopping virtual stick mission")
-                    virtualStickExecutor.stopMission(completed = false)
-                    currentMissionType = MissionType.NONE
-                    promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission stopped"))
-                } catch (e: Exception) {
-                    promise.reject("STOP_ERROR", "Failed to stop virtual stick mission: ${e.message}", null)
-                }
-            }
-            MissionType.NONE -> {
-                promise.reject("NO_MISSION", "No mission is currently running", null)
-            }
+        if (!virtualStickExecutor.isRunning) {
+            promise.reject("NO_MISSION", "No mission is currently running", null)
+            return
         }
+        Log.d(TAG, "Stopping virtual stick mission")
+        virtualStickExecutor.stopMission()
+        promise.resolve(mapOf("success" to true, "message" to "Virtual stick mission stopped"))
     }
 
-    /** Stops a running virtual-stick route without reporting it complete. True if one was running. */
-    fun stopActiveMission(): Boolean {
-        if (currentMissionType != MissionType.VIRTUAL_STICK || !virtualStickExecutor.isRunning) return false
-        virtualStickExecutor.stopMission(completed = false)
-        currentMissionType = MissionType.NONE
-        return true
+    /**
+     * Stops a running route without reporting it complete. True if one was
+     * running; [onReleased] then runs once its sticks are released.
+     */
+    fun stopActiveMission(onReleased: (() -> Unit)? = null): Boolean =
+        virtualStickExecutor.stopMission(onReleased)
+
+    /** Pauses a running route (for example when the drone disconnects). */
+    fun pauseActiveMission(reason: String, source: String) {
+        if (virtualStickExecutor.isRunning) virtualStickExecutor.pauseMission(reason, source)
     }
 
     fun getMissionStatus(): Map<String, Any> {
+        val running = virtualStickExecutor.isRunning
         return mapOf(
-            "isRunning" to (currentMissionType != MissionType.NONE),
-            "isPaused" to false, // Would need to track this properly
-            "missionType" to currentMissionType.name.lowercase()
+            "isRunning" to running,
+            "isPaused" to virtualStickExecutor.isPausedNow,
+            "currentWaypoint" to virtualStickExecutor.currentWaypoint,
+            "missionType" to (if (running) MissionType.VIRTUAL_STICK else MissionType.NONE).name.lowercase()
         )
+    }
+
+    /** Null when every waypoint can be flown, otherwise why not (shown to the pilot). */
+    private fun validateRoute(mission: KMLMission): String? {
+        if (mission.skippedCoordinates > 0) {
+            return "${mission.skippedCoordinates} point(s) of the route could not be read"
+        }
+        val limit = heightLimit()
+        mission.waypoints.forEachIndexed { index, waypoint ->
+            val n = index + 1
+            if (!waypoint.hasAltitude) return "Waypoint $n has no altitude"
+            if (waypoint.altitude < MIN_WAYPOINT_ALTITUDE) {
+                return "Waypoint $n is at ${"%.1f".format(waypoint.altitude)} m; the lowest allowed is ${MIN_WAYPOINT_ALTITUDE.toInt()} m"
+            }
+            if (waypoint.altitude > limit) {
+                return "Waypoint $n is at ${"%.1f".format(waypoint.altitude)} m, above the drone's ${limit.toInt()} m height limit"
+            }
+        }
+        return null
+    }
+
+    /** The drone's height limit (m), or 120 m when it cannot be read. */
+    private fun heightLimit(): Double {
+        val limit = try {
+            FlightControllerKey.KeyHeightLimit.create().get()
+        } catch (e: Exception) {
+            null
+        }
+        return if (limit != null && limit > 0) limit.toDouble() else DEFAULT_HEIGHT_LIMIT
+    }
+
+    /** Marks the route ended once the executor reports its end. */
+    private fun tracking(callback: KMLMissionCallback) = object : KMLMissionCallback by callback {
+        override fun onMissionCompleted() {
+            if (!virtualStickExecutor.isRunning) currentMissionType = MissionType.NONE
+            callback.onMissionCompleted()
+        }
+
+        override fun onMissionFailed(error: String) {
+            if (!virtualStickExecutor.isRunning) currentMissionType = MissionType.NONE
+            callback.onMissionFailed(error)
+        }
+
+        override fun onMissionStopped() {
+            if (!virtualStickExecutor.isRunning) currentMissionType = MissionType.NONE
+            callback.onMissionStopped()
+        }
     }
 
     fun previewMission(kmlFilePath: String, promise: Promise) {
@@ -255,6 +261,8 @@ class KMLMissionManager {
             if (kmlMission.waypoints.size > 99) {
                 issues.add("Too many waypoints (${kmlMission.waypoints.size}), maximum is 99")
             }
+            // The same check that refuses the route at take-off.
+            validateRoute(kmlMission)?.let { issues.add(it) }
 
             promise.resolve(mapOf(
                 "name" to kmlMission.name,
@@ -290,6 +298,8 @@ class KMLMissionManager {
             if (kmlMission.waypoints.size > 99) {
                 issues.add("Too many waypoints (${kmlMission.waypoints.size}), maximum is 99")
             }
+            // The same check that refuses the route at take-off.
+            validateRoute(kmlMission)?.let { issues.add(it) }
 
             Log.d(TAG, "Successfully parsed KML: ${kmlMission.waypoints.size} waypoints")
 
@@ -317,7 +327,10 @@ class KMLMissionManager {
         callback: KMLMissionCallback,
         promise: Promise
     ) {
-        this.missionCallback = callback
+        if (virtualStickExecutor.isBusy) {
+            promise.reject("ROUTE_RUNNING", "A route is already running; pause or end it first", null)
+            return
+        }
 
         try {
             Log.d(TAG, "Attempting to parse KML content, length: ${kmlContent.length}")
@@ -330,19 +343,31 @@ class KMLMissionManager {
                 return
             }
 
+            validateRoute(kmlMission)?.let { problem ->
+                Log.w(TAG, "Route refused: $problem")
+                promise.reject("BAD_ROUTE", problem, null)
+                return
+            }
+
             // Step 2: Use original waypoints without optimization (for testing/debugging)
             Log.d(TAG, "Using ORIGINAL waypoints without optimization for accurate path following")
             val originalWaypoints = kmlMission.waypoints
             val stats = optimizer.calculateMissionStats(originalWaypoints)
-            callback.onMissionPrepared(stats)
 
             // Step 3: Always use virtual stick execution for testing
             Log.d(TAG, "Using Virtual Stick execution with ${originalWaypoints.size} original waypoints")
-            currentMissionType = MissionType.VIRTUAL_STICK
-            
+            val tracked = tracking(callback)
+            this.missionCallback = tracked
+            callback.onMissionPrepared(stats)
+
             // Start virtual stick mission with original waypoints
-            virtualStickExecutor.startMission(originalWaypoints, callback, faceCenter = config.faceCenter, climbFirst = config.climbFirst)
-            
+            val refused = virtualStickExecutor.startMission(originalWaypoints, tracked, faceCenter = config.faceCenter, climbFirst = config.climbFirst)
+            if (refused != null) {
+                promise.reject("ROUTE_RUNNING", refused, null)
+                return
+            }
+            currentMissionType = MissionType.VIRTUAL_STICK
+
             promise.resolve(mapOf(
                 "success" to true,
                 "missionType" to "virtual_stick",

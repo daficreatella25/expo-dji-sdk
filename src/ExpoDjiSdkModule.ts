@@ -37,7 +37,8 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   getDroneInfo(): Promise<boolean>;
   getDetailedDroneInfo(): Promise<DetailedDroneInfo>;
   
-  // Virtual Stick Control
+  // Virtual Stick Control. These, startTakeoff, startLanding, cancelLanding and
+  // startFlyToMission reject with code BUSY while a route or return is active.
   enableVirtualStick(): Promise<{ success: boolean }>;
   disableVirtualStick(): Promise<{ success: boolean }>;
   getVirtualStickState(): Promise<VirtualStickState>;
@@ -113,8 +114,15 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   previewKMLMission(kmlFilePath: string): Promise<KMLMissionPreview>;
   importKMLMissionFromContent(kmlContent: string, options?: KMLMissionConfig): Promise<KMLMissionResult>;
   previewKMLMissionFromContent(kmlContent: string): Promise<KMLMissionPreview>;
+  /** Resolves { success: false, message } when it could not pause. */
   pauseKMLMission(): Promise<{ success: boolean; message: string }>;
+  /**
+   * Resolves once the sticks are taken again, or { success: false, message }
+   * when DJI is flying its own return/landing, the drone is not flying, or
+   * DJI would not hand the sticks back (the route then fails).
+   */
   resumeKMLMission(): Promise<{ success: boolean; message: string }>;
+  /** Ends the route (missionStopped): the drone hovers, the remote has control, the shutter stops. */
   stopKMLMission(): Promise<{ success: boolean; message: string }>;
   getKMLMissionStatus(): Promise<KMLMissionStatus>;
 }

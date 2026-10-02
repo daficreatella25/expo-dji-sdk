@@ -5,18 +5,23 @@ import org.xmlpull.v1.XmlPullParserFactory
 import java.io.File
 import java.io.StringReader
 import android.util.Log
+import kotlin.math.abs
 
 data class KMLWaypoint(
     val longitude: Double,
     val latitude: Double,
     val altitude: Double,
-    val name: String? = null
+    val name: String? = null,
+    /** False when the coordinate had no (readable) altitude; altitude is then 0 and must not be flown. */
+    val hasAltitude: Boolean = true
 )
 
 data class KMLMission(
     val name: String,
     val waypoints: MutableList<KMLWaypoint> = mutableListOf(),
-    val altitudeMode: String = "absolute"
+    val altitudeMode: String = "absolute",
+    /** Coordinates that could not be read at all (dropped from waypoints). */
+    val skippedCoordinates: Int = 0
 )
 
 class KMLParser {
@@ -31,6 +36,7 @@ class KMLParser {
 
     fun parseKML(kmlContent: String): KMLMission {
         val mission = KMLMission(name = "KML Mission", waypoints = mutableListOf())
+        var skipped = 0
 
         try {
             val factory = XmlPullParserFactory.newInstance()
@@ -66,8 +72,9 @@ class KMLParser {
                             }
                             "coordinates" -> {
                                 if (inLineString && parser.next() == XmlPullParser.TEXT) {
-                                    val waypoints = parseCoordinates(parser.text, altitudeMode)
+                                    val (waypoints, unreadable) = parseCoordinates(parser.text, altitudeMode)
                                     mission.waypoints.addAll(waypoints)
+                                    skipped += unreadable
                                 }
                             }
                         }
@@ -83,7 +90,7 @@ class KMLParser {
             }
 
             Log.d(TAG, "Parsed ${mission.waypoints.size} waypoints from KML")
-            return mission.copy(name = missionName)
+            return mission.copy(name = missionName, skippedCoordinates = skipped)
 
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing KML: ${e.message}")
@@ -91,8 +98,10 @@ class KMLParser {
         }
     }
 
-    private fun parseCoordinates(coordinatesText: String, altitudeMode: String): List<KMLWaypoint> {
+    /** The waypoints, and how many coordinates could not be read. */
+    private fun parseCoordinates(coordinatesText: String, altitudeMode: String): Pair<List<KMLWaypoint>, Int> {
         val waypoints = mutableListOf<KMLWaypoint>()
+        var skipped = 0
 
         // Split by whitespace and parse each coordinate triplet
         val coordPairs = coordinatesText.trim().split("\\s+".toRegex())
@@ -101,24 +110,21 @@ class KMLParser {
             val trimmed = coordString.trim()
             if (trimmed.isNotEmpty()) {
                 val parts = trimmed.split(",")
-                if (parts.size >= 2) {
-                    try {
-                        val longitude = parts[0].toDouble()
-                        val latitude = parts[1].toDouble()
-                        val altitude = if (parts.size >= 3) {
-                            parts[2].toDouble()
-                        } else {
-                            0.0
-                        }
-
-                        waypoints.add(KMLWaypoint(longitude, latitude, altitude))
-                    } catch (e: NumberFormatException) {
-                        Log.w(TAG, "Failed to parse coordinate: $coordString")
-                    }
+                val longitude = parts.getOrNull(0)?.trim()?.toDoubleOrNull()
+                val latitude = parts.getOrNull(1)?.trim()?.toDoubleOrNull()
+                if (longitude == null || latitude == null || !longitude.isFinite() || !latitude.isFinite() ||
+                    abs(latitude) > 90.0 || abs(longitude) > 180.0) {
+                    // Counted, not silently dropped: a route missing a point must not fly.
+                    skipped++
+                    Log.w(TAG, "Failed to parse coordinate: $coordString")
+                } else {
+                    // A missing altitude is kept as a flag (not 0 m) so the import can refuse it.
+                    val altitude = parts.getOrNull(2)?.trim()?.toDoubleOrNull()?.takeIf { it.isFinite() }
+                    waypoints.add(KMLWaypoint(longitude, latitude, altitude ?: 0.0, hasAltitude = altitude != null))
                 }
             }
         }
 
-        return waypoints
+        return Pair(waypoints, skipped)
     }
 }

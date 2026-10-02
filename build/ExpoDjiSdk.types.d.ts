@@ -257,9 +257,18 @@ export type KMLMissionPreview = {
     issues: string[];
     supportsNativeWaypoints: boolean;
 };
+/**
+ * importKMLMissionFromContent resolves only when the route executor accepted
+ * the start (take-off and flying follow as events). Rejection codes:
+ * ROUTE_RUNNING (a route is already running), RETURN_IN_PROGRESS,
+ * BAD_ROUTE (a waypoint without altitude, below 5 m, above the drone's height
+ * limit, or an unreadable point), NOT_CONNECTED, PARSE_ERROR, IMPORT_ERROR.
+ * The message is written for the pilot.
+ */
+export type KMLMissionImportErrorCode = 'ROUTE_RUNNING' | 'RETURN_IN_PROGRESS' | 'BAD_ROUTE' | 'NOT_CONNECTED' | 'PARSE_ERROR' | 'IMPORT_ERROR';
 export type KMLMissionResult = {
     success: boolean;
-    missionType?: 'native' | 'virtualStick';
+    missionType?: 'virtual_stick' | 'native' | 'virtualStick';
     waypoints?: number;
     message?: string;
     error?: string;
@@ -267,15 +276,39 @@ export type KMLMissionResult = {
 export type KMLMissionStatus = {
     isRunning: boolean;
     isPaused: boolean;
+    /** Index of the waypoint being flown to (= waypoints reached so far). */
+    currentWaypoint: number;
     missionType: 'none' | 'native' | 'virtual_stick';
 };
+/** What the route executor is doing (missionPhase events, on change). */
+export type KMLMissionPhase = 'takingOff' | 'climbing' | 'flying' | 'waitingForGps';
+/**
+ * Why a route paused. Every pause hands the sticks to the remote; only
+ * resumeKMLMission takes them again (and refuses while DJI is flying its own
+ * return or landing, or the drone is not flying).
+ * - app: pauseKMLMission
+ * - lostControl: virtual sticks off (or unknown) for more than 2 s, e.g. the remote's pause button
+ * - djiMode: DJI started its own return home or landing
+ * - disconnect: the drone disconnected
+ * - stuck: no 1 m of progress toward the current waypoint for 60 s
+ * - gps: no usable GPS for 20 s (it hovers meanwhile)
+ */
+export type KMLMissionPauseSource = 'app' | 'lostControl' | 'djiMode' | 'disconnect' | 'stuck' | 'gps';
 export type KMLMissionEvent = {
-    type: 'missionPrepared' | 'missionStarted' | 'missionProgress' | 'missionCompleted' | 'missionStopped' | 'missionFailed' | 'missionPaused' | 'missionResumed' | 'autoReturnFailed';
+    type: 'missionPrepared' | 'missionStarted' | 'missionPhase' | 'missionProgress' | 'missionCompleted' | 'missionStopped' | 'missionFailed' | 'missionPaused' | 'missionResumed' | 'autoReturnFailed';
     data?: KMLMissionStats | KMLMissionProgress;
     missionType?: string;
     error?: string;
     /** missionCompleted: the drone is about to fly home on its own (returnWhenDone). */
     returning?: boolean;
+    /** missionPhase */
+    phase?: KMLMissionPhase;
+    /** missionPhase 'climbing': the altitude it climbs to (m above take-off). */
+    targetAltitude?: number | null;
+    /** missionPaused: shown to the pilot. */
+    reason?: string | null;
+    /** missionPaused */
+    source?: KMLMissionPauseSource;
 };
 export type DebugLogEvent = {
     timestamp: number;
@@ -294,11 +327,20 @@ export type DebugLogsResponse = {
  * when high, slow near the end), hover with the remote in control until the
  * pilot confirms the landing spot or the auto-land countdown runs out, then
  * DJI auto-landing. Pause holds the countdown, or stops a landing in progress.
+ * 'landed' is reached from any active phase once the drone is on the ground
+ * with the motors off. Continue is refused while DJI flies its own return or
+ * landing.
  */
 export type ReturnToStartPhase = 'idle' | 'returning' | 'descending' | 'landing_check' | 'landing' | 'landed' | 'cancelled' | 'failed';
 export type ReturnToStartState = {
     phase: ReturnToStartPhase;
     paused: boolean;
+    /**
+     * Why it is paused or the landing is held, e.g. "Paused from the app",
+     * "Moved off the start point" (countdown held more than 3 m off the point),
+     * "No GPS position; landing held", "Drone disconnected",
+     * "Landing stopped from the remote", or the virtual sticks were switched off.
+     */
     pauseReason: string | null;
     /** Metres to the take-off point. */
     distanceToHome: number | null;
