@@ -562,9 +562,12 @@ class KMLVirtualStickExecutor(
         )
     }
 
-    /** Sticks off, or no stick state at all, for more than the grace period. */
+    /** Sticks reported off for more than the grace period. */
     private fun sticksLost(): Boolean {
-        if (isVirtualStickEnabled() == true) {
+        // Only an explicit "off" counts: DJI reports the state through a listener
+        // with no getter, so "not reported yet" must not pause a healthy flight.
+        // A real disconnect is handled by the module's onProductDisconnect.
+        if (isVirtualStickEnabled() != false) {
             vsLostSince = 0L
             return false
         }
