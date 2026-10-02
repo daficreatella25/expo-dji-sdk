@@ -462,5 +462,11 @@ export type ExpoDjiSdkModuleEvents = {
     onReturnToStartEvent: (params: ReturnToStartState) => void;
     onPhotoDownloadProgress: (params: PhotoDownloadProgress) => void;
     onTelemetry: (params: DroneTelemetry) => void;
+    /** The camera stayed off the session's gimbal pitch; shots are held back until it is tilted. */
+    onCameraAngle: (params: {
+        pitch: number;
+        target: number;
+        seconds: number;
+    }) => void;
 };
 //# sourceMappingURL=ExpoDjiSdk.types.d.ts.map

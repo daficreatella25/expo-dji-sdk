@@ -130,11 +130,14 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
     getKMLMissionStatus(): Promise<KMLMissionStatus>;
     startPhotoSession(sessionId: string, intervalMs: number, options: {
         resume?: boolean;
+        gimbalPitch?: number;
     }): Promise<{
         success: boolean;
         sessionId: string;
         intervalMs: number;
     }>;
+    /** The gimbal's real pitch (degrees, negative = down); null without a reading. */
+    getGimbalPitch(): number | null;
     pausePhotoSession(): Promise<{
         success: boolean;
         reason?: string;

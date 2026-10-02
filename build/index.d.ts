@@ -163,8 +163,14 @@ export declare const shootPhoto: () => any;
  * startedAt and adds a window instead of starting over. Calling it for the
  * session that is already active just carries on.
  */
+/**
+ * gimbalPitch: the camera angle the photos need (-90 = straight down). It is
+ * checked before every shot; while the gimbal is off by more than 8° it is
+ * tilted back and the shot is skipped (event onCameraAngle if it stays off).
+ */
 export declare const startPhotoSession: (sessionId: string, intervalMs: number, options?: {
     resume?: boolean;
+    gimbalPitch?: number;
 }) => Promise<{
     success: boolean;
     sessionId: string;
@@ -203,5 +209,7 @@ export declare const deleteCapture: (path: string) => Promise<{
 export declare const setGimbalPitch: (degrees: number) => Promise<{
     success: boolean;
     pitch: number;
+    actual: number | null;
 }>;
+export declare const getGimbalPitch: () => number | null;
 //# sourceMappingURL=index.d.ts.map

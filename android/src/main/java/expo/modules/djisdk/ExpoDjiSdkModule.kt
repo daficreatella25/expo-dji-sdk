@@ -220,6 +220,9 @@ class ExpoDjiSdkModule : Module() {
   // Photo-capture session manager (timer + post-flight bulk download)
   private val photoManager: PhotoCaptureManager by lazy {
     PhotoCaptureManager(ContextUtil.getContext()).apply {
+      onCameraAngleProblem = { pitch, target, seconds ->
+        sendEvent("onCameraAngle", mapOf("pitch" to pitch, "target" to target, "seconds" to seconds))
+      }
       onShootResult = { sessionId, shotIndex, success, error ->
         sendEvent("onShootPhotoResult", mapOf(
           "sessionId" to sessionId,
@@ -265,7 +268,7 @@ class ExpoDjiSdkModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExpoDjiSdk")
 
-    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress", "onCompassCalibrationState", "onReturnToStartEvent", "onTelemetry")
+    Events("onSDKRegistrationResult", "onDroneConnectionChange", "onDroneInfoUpdate", "onSDKInitProgress", "onDatabaseDownloadProgress", "onVirtualStickStateChange", "onAvailableCameraUpdated", "onCameraStreamStatusChange", "onTakeoffResult", "onLandingResult", "onFlightStatusChange", "onWaypointMissionUploadProgress", "onKMLMissionEvent", "onDebugLog", "onShootPhotoResult", "onPhotoDownloadProgress", "onCompassCalibrationState", "onReturnToStartEvent", "onTelemetry", "onCameraAngle")
 
     OnDestroy {
       destroyed = true
@@ -773,6 +776,8 @@ class ExpoDjiSdkModule : Module() {
       val resume = options?.get("resume") as? Boolean ?: false
       val started = photoManager.startSession(sessionId, intervalMs.toLong(), resume = resume)
       if (started) {
+        // The camera angle these photos need, checked before every shot.
+        (options?.get("gimbalPitch") as? Number)?.toDouble()?.let { photoManager.setTargetGimbalPitch(it) }
         promise.resolve(mapOf("success" to true, "sessionId" to sessionId, "intervalMs" to intervalMs))
       } else {
         promise.reject("SESSION_ACTIVE", "A photo session is already active. Stop it first.", null)
@@ -877,29 +882,26 @@ class ExpoDjiSdkModule : Module() {
     AsyncFunction("setGimbalPitch") { degrees: Double, promise: Promise ->
       if (!isProductConnected) { promise.reject("NOT_CONNECTED", "No drone connected", null); return@AsyncFunction }
       try {
-        val rotation = GimbalAngleRotation().apply {
-          mode = GimbalAngleRotationMode.ABSOLUTE_ANGLE
-          pitch = degrees
-          roll = 0.0
-          yaw = 0.0
-          pitchIgnored = false
-          rollIgnored = true
-          yawIgnored = true
-          duration = 1.0
-        }
-        GimbalKey.KeyRotateByAngle.create().action(
-          rotation,
-          onSuccess = { _: EmptyMsg ->
-            Log.d(TAG, "Gimbal pitch → $degrees°")
-            promise.resolve(mapOf("success" to true, "pitch" to degrees))
-          },
-          onFailure = { error: IDJIError ->
-            promise.reject("GIMBAL_ERROR", "Failed to set gimbal pitch: ${error.description()}", null)
+        photoManager.tiltGimbal(degrees) { success, error ->
+          if (!success) {
+            promise.reject("GIMBAL_ERROR", "Failed to set gimbal pitch: $error", null)
+            return@tiltGimbal
           }
-        )
+          // DJI accepting the command is not the gimbal getting there: read it back.
+          android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            val actual = photoManager.readGimbalPitch()
+            Log.d(TAG, "Gimbal pitch → $degrees° (reads ${actual ?: "?"}°)")
+            promise.resolve(mapOf("success" to true, "pitch" to degrees, "actual" to actual))
+          }, 1300L)
+        }
       } catch (e: Exception) {
         promise.reject("GIMBAL_ERROR", "Failed to set gimbal pitch: ${e.message}", e)
       }
+    }
+
+    // The gimbal's real attitude (degrees; pitch negative = down), null without a reading.
+    Function("getGimbalPitch") {
+      photoManager.readGimbalPitch()
     }
 
     // Virtual Stick Control Methods

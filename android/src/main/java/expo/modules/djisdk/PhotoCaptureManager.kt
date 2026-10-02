@@ -7,11 +7,14 @@ import android.os.SystemClock
 import android.util.Log
 import dji.sdk.keyvalue.key.CameraKey
 import dji.sdk.keyvalue.key.FlightControllerKey
+import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.key.KeyTools
 import dji.sdk.keyvalue.value.camera.CameraMode
 import dji.sdk.keyvalue.value.camera.CameraStorageLocation
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.common.EmptyMsg
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.et.create
@@ -32,6 +35,7 @@ import java.io.OutputStream
 import java.util.Calendar
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 
 /**
  * Manages photo-capture sessions:
@@ -51,6 +55,12 @@ import java.util.concurrent.atomic.AtomicReference
  *   <filesDir>/captures/<sessionId>/manifest.json
  *     { sessionId, startedAt, endedAt, intervalMs, shotCount, windows: [{ start, end }] }
  *
+ * Camera angle guard: a session can carry the gimbal pitch its photos need
+ * (-90 straight down for mapping). Before every shot the real gimbal attitude
+ * is read; if it is more than GIMBAL_TOLERANCE_DEG off (DJI levels the gimbal
+ * around take-off; the remote's wheel can move it) the gimbal is tilted back
+ * and that shot is skipped, so no photo of the horizon is ever taken.
+ *
  * IMPORTANT: MediaManager.enable() pauses the live video stream. We only call enable() during
  * downloadSessionPhotos and disable it immediately after, so the live preview comes back.
  */
@@ -64,6 +74,10 @@ class PhotoCaptureManager(private val context: Context) {
     private const val WINDOW_TAIL_MS = 60_000L // photos written just after a window closed (shutter race)
     private const val PROGRESS_MIN_INTERVAL_MS = 250L // progress events at most 4 Hz
     private const val CANCEL_FALLBACK_MS = 3_000L
+    private const val GIMBAL_TOLERANCE_DEG = 8.0
+    private const val GIMBAL_RETRY_MS = 2_000L // between tilt commands while it is still off
+    private const val GIMBAL_RECHECK_MS = 500L // next look at the angle after a skipped shot
+    private const val GIMBAL_WARN_EVERY_MS = 10_000L
     private val TIMER_TOKEN = Any()
   }
 
@@ -91,12 +105,19 @@ class PhotoCaptureManager(private val context: Context) {
 
   /** While the route climbs in place (or takes off) every shot would show the same spot. */
   @Volatile private var skipShots = false
+  /** Where the camera must point for this session's photos (degrees, negative = down); null = no check. */
+  @Volatile private var targetGimbalPitch: Double? = null
+  private var lastTiltAt = 0L
+  private var offSince = 0L
+  private var lastWarnAt = 0L
   /** Bumped when the timer starts or stops: older ticks and shot answers do not reschedule. */
   private var timerGen = 0
 
   data class DownloadError(val code: String, val message: String)
 
   var onShootResult: ((sessionId: String, shotIndex: Int, success: Boolean, error: String?) -> Unit)? = null
+  /** The camera has been off its target angle for a while (shots are being held back). */
+  var onCameraAngleProblem: ((pitch: Double, target: Double, seconds: Long) -> Unit)? = null
   /** [index] is 1-based among the [count] photos of this download. */
   var onDownloadProgress: ((sessionId: String, fileName: String, downloadedBytes: Long, totalBytes: Long, finished: Boolean, index: Int, count: Int) -> Unit)? = null
 
@@ -129,6 +150,75 @@ class PhotoCaptureManager(private val context: Context) {
         }
       }
     )
+  }
+
+  // ---------- Gimbal ----------
+
+  /** The gimbal's real pitch (degrees, negative = down), or null when DJI has no reading. */
+  fun readGimbalPitch(): Double? =
+    try {
+      KeyManager.getInstance().getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitude, componentIndex))?.pitch
+    } catch (e: Exception) {
+      null
+    }
+
+  fun tiltGimbal(pitch: Double, onDone: ((success: Boolean, error: String?) -> Unit)? = null) {
+    val rotation = GimbalAngleRotation().apply {
+      mode = GimbalAngleRotationMode.ABSOLUTE_ANGLE
+      this.pitch = pitch
+      roll = 0.0
+      yaw = 0.0
+      pitchIgnored = false
+      rollIgnored = true
+      yawIgnored = true
+      duration = 1.0
+    }
+    KeyManager.getInstance().performAction(
+      KeyTools.createKey(GimbalKey.KeyRotateByAngle, componentIndex),
+      rotation,
+      object : CommonCallbacks.CompletionCallbackWithParam<EmptyMsg> {
+        override fun onSuccess(msg: EmptyMsg?) { onDone?.invoke(true, null) }
+        override fun onFailure(error: IDJIError) {
+          Log.w(TAG, "gimbal tilt to $pitch° failed: ${error.description()}")
+          onDone?.invoke(false, error.description())
+        }
+      },
+    )
+  }
+
+  /** Photos of this session need the camera at [pitch]; null stops checking. Tilts right away. */
+  fun setTargetGimbalPitch(pitch: Double?) {
+    targetGimbalPitch = pitch
+    offSince = 0L
+    if (pitch != null) {
+      lastTiltAt = SystemClock.uptimeMillis()
+      tiltGimbal(pitch)
+    }
+  }
+
+  /**
+   * True when the shot may go ahead. Otherwise the gimbal is (re)tilted and
+   * the caller skips this shot; the pilot is told if it stays off.
+   */
+  private fun cameraAimed(): Boolean {
+    val target = targetGimbalPitch ?: return true
+    val pitch = readGimbalPitch() ?: return true // no reading: don't block the photos
+    val now = SystemClock.uptimeMillis()
+    if (abs(pitch - target) <= GIMBAL_TOLERANCE_DEG) {
+      offSince = 0L
+      return true
+    }
+    if (offSince == 0L) offSince = now
+    if (now - lastTiltAt > GIMBAL_RETRY_MS) {
+      lastTiltAt = now
+      Log.w(TAG, "camera at ${"%.1f".format(pitch)}°, photos need $target°: tilting, shot skipped")
+      tiltGimbal(target)
+    }
+    if (now - offSince > GIMBAL_WARN_EVERY_MS && now - lastWarnAt > GIMBAL_WARN_EVERY_MS) {
+      lastWarnAt = now
+      onCameraAngleProblem?.invoke(pitch, target, (now - offSince) / 1000)
+    }
+    return false
   }
 
   // ---------- Session timer ----------
@@ -209,6 +299,7 @@ class PhotoCaptureManager(private val context: Context) {
       session.endedAtMs = now
       session.paused = false
       activeSession = null
+      targetGimbalPitch = null
       saveManifest(session)
       Log.d(TAG, "stopSession sessionId=${session.sessionId} shotCount=${session.shotCount}")
       return session
@@ -256,6 +347,10 @@ class PhotoCaptureManager(private val context: Context) {
     if (!isCurrent(session, gen)) return
     if (skipShots) {
       postTick(session, gen, session.intervalMs)
+      return
+    }
+    if (!cameraAimed()) {
+      postTick(session, gen, GIMBAL_RECHECK_MS)
       return
     }
     val shotAt = SystemClock.uptimeMillis()

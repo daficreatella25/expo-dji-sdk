@@ -149,7 +149,12 @@ export const shootPhoto = () => ExpoDjiSdkModule.shootPhoto();
  * startedAt and adds a window instead of starting over. Calling it for the
  * session that is already active just carries on.
  */
-export const startPhotoSession = (sessionId: string, intervalMs: number, options?: { resume?: boolean }) =>
+/**
+ * gimbalPitch: the camera angle the photos need (-90 = straight down). It is
+ * checked before every shot; while the gimbal is off by more than 8° it is
+ * tilted back and the shot is skipped (event onCameraAngle if it stays off).
+ */
+export const startPhotoSession = (sessionId: string, intervalMs: number, options?: { resume?: boolean; gimbalPitch?: number }) =>
   ExpoDjiSdkModule.startPhotoSession(sessionId, intervalMs, options ?? {});
 /** Holds the shutter and closes the current window; the session stays. The route does this itself when it pauses. */
 export const pausePhotoSession = () => ExpoDjiSdkModule.pausePhotoSession();
@@ -177,5 +182,7 @@ export const deleteCapture = (path: string): Promise<{ success: boolean }> =>
 
 // Gimbal — absolute pitch in degrees. Down is negative: setGimbalPitch(-60)
 // points the camera 60° toward the ground for inspection.
-export const setGimbalPitch = (degrees: number): Promise<{ success: boolean; pitch: number }> =>
+// Resolves after reading the gimbal back: `actual` is where it really is.
+export const setGimbalPitch = (degrees: number): Promise<{ success: boolean; pitch: number; actual: number | null }> =>
   ExpoDjiSdkModule.setGimbalPitch(degrees);
+export const getGimbalPitch = (): number | null => ExpoDjiSdkModule.getGimbalPitch();
