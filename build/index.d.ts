@@ -1,6 +1,7 @@
 export { default } from './ExpoDjiSdkModule';
 export { default as CameraStreamView } from './CameraStreamView';
 export * from './ExpoDjiSdk.types';
+import type { KMLMissionConfig } from './ExpoDjiSdk.types';
 export declare const testSDKClass: () => Promise<import("./ExpoDjiSdk.types").SDKTestResult>;
 export declare const initializeSDK: () => Promise<import("./ExpoDjiSdk.types").SDKInitializationResult>;
 export declare const isDroneConnected: () => Promise<import("./ExpoDjiSdk.types").DroneConnectionStatus>;
@@ -50,13 +51,34 @@ export declare const isLandingConfirmationNeeded: () => Promise<{
     success: boolean;
     error?: string;
 }>;
+/** Latest 1 Hz telemetry snapshot; null before the first connection. */
+export declare const getTelemetry: () => import("./ExpoDjiSdk.types").DroneTelemetry | null;
+/** Battery, GPS, flight mode, position, home and speed once a second while a drone is connected. */
+export declare const addTelemetryListener: (listener: (telemetry: import("./ExpoDjiSdk.types").DroneTelemetry) => void) => import("expo-modules-core/build/ts-declarations/EventEmitter").EventSubscription;
 export declare const getFlightStatus: () => Promise<import("./ExpoDjiSdk.types").FlightStatus>;
 export declare const isReadyForTakeoff: () => Promise<import("./ExpoDjiSdk.types").ReadinessCheck>;
 export declare const getPreflightReport: () => Promise<import("./ExpoDjiSdk.types").PreflightReport>;
 export declare const startCompassCalibration: () => Promise<{
     success: boolean;
     message: string;
+    startedAt?: number;
 }>;
+export declare const stopCompassCalibration: () => Promise<{
+    success: boolean;
+}>;
+export declare const stopWatchingCompassCalibration: () => void;
+/** Live compass calibration status (after startCompassCalibration). */
+export declare const startReturnToStart: (options?: {
+    autoLandAfterMs?: number;
+}) => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const pauseReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const resumeReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const landReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const confirmReturnLanding: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const cancelReturnToStart: () => Promise<import("./ExpoDjiSdk.types").ReturnToStartState>;
+export declare const getReturnToStartState: () => import("./ExpoDjiSdk.types").ReturnToStartState;
+export declare const addReturnToStartListener: (listener: (state: import("./ExpoDjiSdk.types").ReturnToStartState) => void) => import("expo-modules-core/build/ts-declarations/EventEmitter").EventSubscription;
+export declare const addCompassCalibrationListener: (listener: (event: import("./ExpoDjiSdk.types").CompassCalibrationEvent) => void) => import("expo-modules-core/build/ts-declarations/EventEmitter").EventSubscription;
 export declare const getCompassCalibrationStatus: () => Promise<import("./ExpoDjiSdk.types").CompassCalibrationStatus>;
 export declare const getCompassHealth: () => Promise<import("./ExpoDjiSdk.types").CompassHealth>;
 export declare const getAltitude: () => Promise<import("./ExpoDjiSdk.types").AltitudeInfo>;
@@ -90,8 +112,8 @@ export declare const getCameraStreamStatus: (cameraIndex: number) => Promise<imp
 export declare const getCameraStreamInfo: (cameraIndex: number) => Promise<import("./ExpoDjiSdk.types").CameraStreamInfo>;
 export declare const previewKMLMissionFromContent: (kmlContent: string) => Promise<import("./ExpoDjiSdk.types").KMLMissionPreview>;
 export declare const convertKMLContentToKMZ: (kmlContent: string) => any;
-export declare const importAndExecuteKMLFromContent: (kmlContent: string, options?: any) => Promise<import("./ExpoDjiSdk.types").KMLMissionResult>;
-export declare const importKMLMissionFromContent: (kmlContent: string, options?: any) => Promise<import("./ExpoDjiSdk.types").KMLMissionResult>;
+export declare const importAndExecuteKMLFromContent: (kmlContent: string, options?: KMLMissionConfig) => Promise<import("./ExpoDjiSdk.types").KMLMissionResult>;
+export declare const importKMLMissionFromContent: (kmlContent: string, options?: KMLMissionConfig) => Promise<import("./ExpoDjiSdk.types").KMLMissionResult>;
 export declare const pauseKMLMission: () => Promise<{
     success: boolean;
     message: string;
@@ -130,15 +152,54 @@ export interface ActiveSession {
     shotCount: number;
     startedAt: number;
     intervalMs: number;
+    /** Timer held (route paused, drone disconnected, or pausePhotoSession). */
+    paused: boolean;
 }
 export declare const setCameraMode: (mode: CameraMode) => any;
 export declare const shootPhoto: () => any;
-export declare const startPhotoSession: (sessionId: string, intervalMs: number) => any;
+/**
+ * Starts the interval shutter. With `resume: true` and an earlier manifest for
+ * this sessionId (same flight, e.g. continue from waypoint N), keeps its
+ * startedAt and adds a window instead of starting over. Calling it for the
+ * session that is already active just carries on.
+ */
+/**
+ * gimbalPitch: the camera angle the photos need (-90 = straight down). It is
+ * checked before every shot; while the gimbal is off by more than 8° it is
+ * tilted back and the shot is skipped (event onCameraAngle if it stays off).
+ */
+export declare const startPhotoSession: (sessionId: string, intervalMs: number, options?: {
+    resume?: boolean;
+    gimbalPitch?: number;
+}) => Promise<{
+    success: boolean;
+    sessionId: string;
+    intervalMs: number;
+}>;
+/** Holds the shutter and closes the current window; the session stays. The route does this itself when it pauses. */
+export declare const pausePhotoSession: () => Promise<{
+    success: boolean;
+    reason?: string;
+}>;
+/** Opens a new window and restarts the shutter. The route does this itself when it continues. */
+export declare const resumePhotoSession: () => Promise<{
+    success: boolean;
+    reason?: string;
+}>;
 export declare const stopPhotoSession: () => any;
 export declare const getActivePhotoSession: () => Promise<ActiveSession | null>;
+/**
+ * Copies this session's photos (taken inside its windows) to the phone.
+ * Rejects with a PhotoDownloadErrorCode; progress on onPhotoDownloadProgress.
+ */
 export declare const downloadSessionPhotos: (sessionId: string) => Promise<{
     downloaded: number;
     skipped: number;
+    failed: number;
+}>;
+/** Stops a running download (it rejects with CANCELLED). success: false when none was running. */
+export declare const cancelPhotoDownload: () => Promise<{
+    success: boolean;
 }>;
 export declare const listCaptureSessions: () => Promise<CaptureSession[]>;
 export declare const listCapturesInSession: (sessionId: string) => Promise<CapturedPhoto[]>;
@@ -148,5 +209,7 @@ export declare const deleteCapture: (path: string) => Promise<{
 export declare const setGimbalPitch: (degrees: number) => Promise<{
     success: boolean;
     pitch: number;
+    actual: number | null;
 }>;
+export declare const getGimbalPitch: () => number | null;
 //# sourceMappingURL=index.d.ts.map

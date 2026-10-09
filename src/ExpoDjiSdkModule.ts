@@ -26,7 +26,9 @@ import {
   KMLMissionConfig,
   KMLMissionPreview,
   KMLMissionResult,
-  KMLMissionStatus
+  KMLMissionStatus,
+  ReturnToStartState,
+  DroneTelemetry,
 } from './ExpoDjiSdk.types';
 
 declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
@@ -36,7 +38,8 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   getDroneInfo(): Promise<boolean>;
   getDetailedDroneInfo(): Promise<DetailedDroneInfo>;
   
-  // Virtual Stick Control
+  // Virtual Stick Control. These, startTakeoff, startLanding, cancelLanding and
+  // startFlyToMission reject with code BUSY while a route or return is active.
   enableVirtualStick(): Promise<{ success: boolean }>;
   disableVirtualStick(): Promise<{ success: boolean }>;
   getVirtualStickState(): Promise<VirtualStickState>;
@@ -58,12 +61,23 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   isLandingConfirmationNeeded(): Promise<{ isNeeded: boolean; success: boolean; error?: string }>;
   
   // Flight Status and Readiness
+  /** Latest 1 Hz telemetry snapshot (onTelemetry); null before the first connection. */
+  getTelemetry(): DroneTelemetry | null;
   getFlightStatus(): Promise<FlightStatus>;
   isReadyForTakeoff(): Promise<ReadinessCheck>;
   getPreflightReport(): Promise<PreflightReport>;
   
   // Calibration
-  startCompassCalibration(): Promise<{ success: boolean; message: string }>;
+  startCompassCalibration(): Promise<{ success: boolean; message: string; startedAt?: number }>;
+  stopCompassCalibration(): Promise<{ success: boolean }>;
+  stopWatchingCompassCalibration(): void;
+  startReturnToStart(options?: { autoLandAfterMs?: number }): Promise<ReturnToStartState>;
+  pauseReturnToStart(): Promise<ReturnToStartState>;
+  resumeReturnToStart(): Promise<ReturnToStartState>;
+  landReturnToStart(): Promise<ReturnToStartState>;
+  confirmReturnLanding(): Promise<ReturnToStartState>;
+  cancelReturnToStart(): Promise<ReturnToStartState>;
+  getReturnToStartState(): ReturnToStartState;
   getCompassCalibrationStatus(): Promise<CompassCalibrationStatus>;
   getCompassHealth(): Promise<CompassHealth>;
   
@@ -103,10 +117,30 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
   previewKMLMission(kmlFilePath: string): Promise<KMLMissionPreview>;
   importKMLMissionFromContent(kmlContent: string, options?: KMLMissionConfig): Promise<KMLMissionResult>;
   previewKMLMissionFromContent(kmlContent: string): Promise<KMLMissionPreview>;
+  /** Resolves { success: false, message } when it could not pause. */
   pauseKMLMission(): Promise<{ success: boolean; message: string }>;
+  /**
+   * Resolves once the sticks are taken again, or { success: false, message }
+   * when DJI is flying its own return/landing, the drone is not flying, or
+   * DJI would not hand the sticks back (the route then fails).
+   */
   resumeKMLMission(): Promise<{ success: boolean; message: string }>;
+  /** Ends the route (missionStopped): the drone hovers, the remote has control, the shutter stops. */
   stopKMLMission(): Promise<{ success: boolean; message: string }>;
   getKMLMissionStatus(): Promise<KMLMissionStatus>;
+
+  // Photo capture: one session per flight (PhotoCaptureManager.kt)
+  startPhotoSession(
+    sessionId: string,
+    intervalMs: number,
+    options: { resume?: boolean; gimbalPitch?: number }
+  ): Promise<{ success: boolean; sessionId: string; intervalMs: number }>;
+  /** The gimbal's real pitch (degrees, negative = down); null without a reading. */
+  getGimbalPitch(): number | null;
+  pausePhotoSession(): Promise<{ success: boolean; reason?: string }>;
+  resumePhotoSession(): Promise<{ success: boolean; reason?: string }>;
+  downloadSessionPhotos(sessionId: string): Promise<{ downloaded: number; skipped: number; failed: number }>;
+  cancelPhotoDownload(): Promise<{ success: boolean }>;
 }
 
 // This call loads the native module object from the JSI.

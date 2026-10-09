@@ -26,11 +26,28 @@ export const cancelLanding = () => ExpoDjiSdkModule.cancelLanding();
 export const confirmLanding = () => ExpoDjiSdkModule.confirmLanding();
 export const isLandingConfirmationNeeded = () => ExpoDjiSdkModule.isLandingConfirmationNeeded();
 // Flight Status and Readiness
+/** Latest 1 Hz telemetry snapshot; null before the first connection. */
+export const getTelemetry = () => ExpoDjiSdkModule.getTelemetry();
+/** Battery, GPS, flight mode, position, home and speed once a second while a drone is connected. */
+export const addTelemetryListener = (listener) => ExpoDjiSdkModule.addListener('onTelemetry', listener);
 export const getFlightStatus = () => ExpoDjiSdkModule.getFlightStatus();
 export const isReadyForTakeoff = () => ExpoDjiSdkModule.isReadyForTakeoff();
 export const getPreflightReport = () => ExpoDjiSdkModule.getPreflightReport();
 // Calibration
 export const startCompassCalibration = () => ExpoDjiSdkModule.startCompassCalibration();
+export const stopCompassCalibration = () => ExpoDjiSdkModule.stopCompassCalibration();
+export const stopWatchingCompassCalibration = () => ExpoDjiSdkModule.stopWatchingCompassCalibration();
+/** Live compass calibration status (after startCompassCalibration). */
+// Return to start (see ReturnToStartState)
+export const startReturnToStart = (options) => ExpoDjiSdkModule.startReturnToStart(options ?? {});
+export const pauseReturnToStart = () => ExpoDjiSdkModule.pauseReturnToStart();
+export const resumeReturnToStart = () => ExpoDjiSdkModule.resumeReturnToStart();
+export const landReturnToStart = () => ExpoDjiSdkModule.landReturnToStart();
+export const confirmReturnLanding = () => ExpoDjiSdkModule.confirmReturnLanding();
+export const cancelReturnToStart = () => ExpoDjiSdkModule.cancelReturnToStart();
+export const getReturnToStartState = () => ExpoDjiSdkModule.getReturnToStartState();
+export const addReturnToStartListener = (listener) => ExpoDjiSdkModule.addListener('onReturnToStartEvent', listener);
+export const addCompassCalibrationListener = (listener) => ExpoDjiSdkModule.addListener('onCompassCalibrationState', listener);
 export const getCompassCalibrationStatus = () => ExpoDjiSdkModule.getCompassCalibrationStatus();
 export const getCompassHealth = () => ExpoDjiSdkModule.getCompassHealth();
 // Altitude and GPS
@@ -75,14 +92,37 @@ export const getDebugLogs = () => ExpoDjiSdkModule.getDebugLogs();
 export const clearDebugLogs = () => ExpoDjiSdkModule.clearDebugLogs();
 export const setCameraMode = (mode) => ExpoDjiSdkModule.setCameraMode(mode);
 export const shootPhoto = () => ExpoDjiSdkModule.shootPhoto();
-export const startPhotoSession = (sessionId, intervalMs) => ExpoDjiSdkModule.startPhotoSession(sessionId, intervalMs);
+/**
+ * Starts the interval shutter. With `resume: true` and an earlier manifest for
+ * this sessionId (same flight, e.g. continue from waypoint N), keeps its
+ * startedAt and adds a window instead of starting over. Calling it for the
+ * session that is already active just carries on.
+ */
+/**
+ * gimbalPitch: the camera angle the photos need (-90 = straight down). It is
+ * checked before every shot; while the gimbal is off by more than 8° it is
+ * tilted back and the shot is skipped (event onCameraAngle if it stays off).
+ */
+export const startPhotoSession = (sessionId, intervalMs, options) => ExpoDjiSdkModule.startPhotoSession(sessionId, intervalMs, options ?? {});
+/** Holds the shutter and closes the current window; the session stays. The route does this itself when it pauses. */
+export const pausePhotoSession = () => ExpoDjiSdkModule.pausePhotoSession();
+/** Opens a new window and restarts the shutter. The route does this itself when it continues. */
+export const resumePhotoSession = () => ExpoDjiSdkModule.resumePhotoSession();
 export const stopPhotoSession = () => ExpoDjiSdkModule.stopPhotoSession();
 export const getActivePhotoSession = () => ExpoDjiSdkModule.getActivePhotoSession();
+/**
+ * Copies this session's photos (taken inside its windows) to the phone.
+ * Rejects with a PhotoDownloadErrorCode; progress on onPhotoDownloadProgress.
+ */
 export const downloadSessionPhotos = (sessionId) => ExpoDjiSdkModule.downloadSessionPhotos(sessionId);
+/** Stops a running download (it rejects with CANCELLED). success: false when none was running. */
+export const cancelPhotoDownload = () => ExpoDjiSdkModule.cancelPhotoDownload();
 export const listCaptureSessions = () => ExpoDjiSdkModule.listCaptureSessions();
 export const listCapturesInSession = (sessionId) => ExpoDjiSdkModule.listCapturesInSession(sessionId);
 export const deleteCapture = (path) => ExpoDjiSdkModule.deleteCapture(path);
 // Gimbal — absolute pitch in degrees. Down is negative: setGimbalPitch(-60)
 // points the camera 60° toward the ground for inspection.
+// Resolves after reading the gimbal back: `actual` is where it really is.
 export const setGimbalPitch = (degrees) => ExpoDjiSdkModule.setGimbalPitch(degrees);
+export const getGimbalPitch = () => ExpoDjiSdkModule.getGimbalPitch();
 //# sourceMappingURL=index.js.map

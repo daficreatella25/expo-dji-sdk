@@ -1,5 +1,5 @@
 import { NativeModule } from 'expo';
-import { ExpoDjiSdkModuleEvents, SDKInitializationResult, SDKTestResult, DroneConnectionStatus, VirtualStickState, DetailedDroneInfo, CameraStreamStatus, CameraStreamInfo, CameraIndex, FlightStatus, ReadinessCheck, CompassCalibrationStatus, CompassHealth, PreflightReport, AltitudeInfo, GPSLocation, FlyToMissionInfo, FlyToResult, WaypointMissionSupport, WaypointMissionState, WaypointMissionLoadResult, WaypointMissionResult, KMLMissionConfig, KMLMissionPreview, KMLMissionResult, KMLMissionStatus } from './ExpoDjiSdk.types';
+import { ExpoDjiSdkModuleEvents, SDKInitializationResult, SDKTestResult, DroneConnectionStatus, VirtualStickState, DetailedDroneInfo, CameraStreamStatus, CameraStreamInfo, CameraIndex, FlightStatus, ReadinessCheck, CompassCalibrationStatus, CompassHealth, PreflightReport, AltitudeInfo, GPSLocation, FlyToMissionInfo, FlyToResult, WaypointMissionSupport, WaypointMissionState, WaypointMissionLoadResult, WaypointMissionResult, KMLMissionConfig, KMLMissionPreview, KMLMissionResult, KMLMissionStatus, ReturnToStartState, DroneTelemetry } from './ExpoDjiSdk.types';
 declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
     testSDKClass(): Promise<SDKTestResult>;
     initializeSDK(): Promise<SDKInitializationResult>;
@@ -50,13 +50,29 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
         success: boolean;
         error?: string;
     }>;
+    /** Latest 1 Hz telemetry snapshot (onTelemetry); null before the first connection. */
+    getTelemetry(): DroneTelemetry | null;
     getFlightStatus(): Promise<FlightStatus>;
     isReadyForTakeoff(): Promise<ReadinessCheck>;
     getPreflightReport(): Promise<PreflightReport>;
     startCompassCalibration(): Promise<{
         success: boolean;
         message: string;
+        startedAt?: number;
     }>;
+    stopCompassCalibration(): Promise<{
+        success: boolean;
+    }>;
+    stopWatchingCompassCalibration(): void;
+    startReturnToStart(options?: {
+        autoLandAfterMs?: number;
+    }): Promise<ReturnToStartState>;
+    pauseReturnToStart(): Promise<ReturnToStartState>;
+    resumeReturnToStart(): Promise<ReturnToStartState>;
+    landReturnToStart(): Promise<ReturnToStartState>;
+    confirmReturnLanding(): Promise<ReturnToStartState>;
+    cancelReturnToStart(): Promise<ReturnToStartState>;
+    getReturnToStartState(): ReturnToStartState;
     getCompassCalibrationStatus(): Promise<CompassCalibrationStatus>;
     getCompassHealth(): Promise<CompassHealth>;
     getAltitude(): Promise<AltitudeInfo>;
@@ -92,19 +108,52 @@ declare class ExpoDjiSdkModule extends NativeModule<ExpoDjiSdkModuleEvents> {
     previewKMLMission(kmlFilePath: string): Promise<KMLMissionPreview>;
     importKMLMissionFromContent(kmlContent: string, options?: KMLMissionConfig): Promise<KMLMissionResult>;
     previewKMLMissionFromContent(kmlContent: string): Promise<KMLMissionPreview>;
+    /** Resolves { success: false, message } when it could not pause. */
     pauseKMLMission(): Promise<{
         success: boolean;
         message: string;
     }>;
+    /**
+     * Resolves once the sticks are taken again, or { success: false, message }
+     * when DJI is flying its own return/landing, the drone is not flying, or
+     * DJI would not hand the sticks back (the route then fails).
+     */
     resumeKMLMission(): Promise<{
         success: boolean;
         message: string;
     }>;
+    /** Ends the route (missionStopped): the drone hovers, the remote has control, the shutter stops. */
     stopKMLMission(): Promise<{
         success: boolean;
         message: string;
     }>;
     getKMLMissionStatus(): Promise<KMLMissionStatus>;
+    startPhotoSession(sessionId: string, intervalMs: number, options: {
+        resume?: boolean;
+        gimbalPitch?: number;
+    }): Promise<{
+        success: boolean;
+        sessionId: string;
+        intervalMs: number;
+    }>;
+    /** The gimbal's real pitch (degrees, negative = down); null without a reading. */
+    getGimbalPitch(): number | null;
+    pausePhotoSession(): Promise<{
+        success: boolean;
+        reason?: string;
+    }>;
+    resumePhotoSession(): Promise<{
+        success: boolean;
+        reason?: string;
+    }>;
+    downloadSessionPhotos(sessionId: string): Promise<{
+        downloaded: number;
+        skipped: number;
+        failed: number;
+    }>;
+    cancelPhotoDownload(): Promise<{
+        success: boolean;
+    }>;
 }
 declare const _default: ExpoDjiSdkModule;
 export default _default;

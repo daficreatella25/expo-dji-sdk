@@ -3,65 +3,128 @@ package expo.modules.djisdk
 import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import dji.sdk.keyvalue.key.CameraKey
+import dji.sdk.keyvalue.key.FlightControllerKey
+import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.key.KeyTools
 import dji.sdk.keyvalue.value.camera.CameraMode
 import dji.sdk.keyvalue.value.camera.CameraStorageLocation
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.common.EmptyMsg
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
+import dji.v5.et.create
+import dji.v5.et.get
 import dji.v5.manager.KeyManager
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.datacenter.media.MediaFile
 import dji.v5.manager.datacenter.media.MediaFileDownloadListener
 import dji.v5.manager.datacenter.media.MediaFileListData
 import dji.v5.manager.datacenter.media.MediaFileListDataSource
-import dji.v5.manager.datacenter.media.MediaFileListState
 import dji.v5.manager.datacenter.media.PullMediaFileListParam
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 
 /**
  * Manages photo-capture sessions:
  *  - Switching camera to photo mode
  *  - Triggering shutter on a fixed interval (saves to drone SD card during flight)
- *  - Post-flight download of files matching the session window to phone storage
+ *  - Post-flight download of files matching the session windows to phone storage
  *  - Local capture listing for the in-app gallery
+ *
+ * One session per flight: pausing (route paused, drone disconnected) stops the
+ * timer and closes the current window; resuming opens a new window in the same
+ * session, and starting again with resume=true appends to the existing
+ * manifest instead of replacing it. The download keeps photos taken inside any
+ * window (5 s before its start to 60 s after its end).
  *
  * Storage layout on phone:
  *   <filesDir>/captures/<sessionId>/<droneFileName>.jpg
- *   <filesDir>/captures/<sessionId>/manifest.json   { sessionId, startedAt, endedAt, intervalMs, shotCount }
+ *   <filesDir>/captures/<sessionId>/manifest.json
+ *     { sessionId, startedAt, endedAt, intervalMs, shotCount, windows: [{ start, end }] }
+ *
+ * Camera angle guard: a session can carry the gimbal pitch its photos need
+ * (-90 straight down for mapping). Before every shot the real gimbal attitude
+ * is read; if it is more than GIMBAL_TOLERANCE_DEG off (DJI levels the gimbal
+ * around take-off; the remote's wheel can move it) the gimbal is tilted back
+ * and that shot is skipped, for at most GIMBAL_MAX_HOLD_MS per misalignment;
+ * after that shots continue (re-tilting and warning) so photos are never lost
+ * to a wrong reading.
  *
  * IMPORTANT: MediaManager.enable() pauses the live video stream. We only call enable() during
  * downloadSessionPhotos and disable it immediately after, so the live preview comes back.
  */
 class PhotoCaptureManager(private val context: Context) {
-  companion object { private const val TAG = "PhotoCaptureManager" }
+  companion object {
+    private const val TAG = "PhotoCaptureManager"
+    private const val MIN_INTERVAL_MS = 1500L // hard floor: Mini 3 single-shot can't keep up below this
+    // A shutter DJI never answers must not stop the cadence for good.
+    private const val SHOT_TIMEOUT_MS = 10_000L
+    private const val WINDOW_HEAD_MS = 5_000L // DJI file times are whole seconds (and clocks drift a little)
+    private const val WINDOW_TAIL_MS = 60_000L // photos written just after a window closed (shutter race)
+    private const val PROGRESS_MIN_INTERVAL_MS = 250L // progress events at most 4 Hz
+    private const val CANCEL_FALLBACK_MS = 3_000L
+    private const val GIMBAL_TOLERANCE_DEG = 8.0
+    private const val GIMBAL_RETRY_MS = 2_000L // between tilt commands while it is still off
+    private const val GIMBAL_RECHECK_MS = 500L // next look at the angle after a skipped shot
+    private const val GIMBAL_WARN_EVERY_MS = 10_000L
+    // Never hold photos back longer than this for one misalignment: a wrong
+    // reading must not cost the whole flight's photos.
+    private const val GIMBAL_MAX_HOLD_MS = 6_000L
+    private val TIMER_TOKEN = Any()
+  }
 
   private val timerThread = HandlerThread("PhotoCaptureTimer").apply { start() }
   private val timerHandler = Handler(timerThread.looper)
+  private val lock = Any()
 
   private var componentIndex: ComponentIndexType = ComponentIndexType.LEFT_OR_MAIN
 
-  // Active session
-  data class Session(
+  /** One stretch of shooting; end is null while it is open. */
+  class Window(val startMs: Long, var endMs: Long? = null)
+
+  // Active session (fields guarded by `lock`)
+  class Session(
     val sessionId: String,
     val startedAtMs: Long,
     val intervalMs: Long,
     var shotCount: Int = 0,
     var endedAtMs: Long? = null,
+    val windows: MutableList<Window> = mutableListOf(),
+    var paused: Boolean = false,
   )
   @Volatile var activeSession: Session? = null
     private set
 
+  /** While the route climbs in place (or takes off) every shot would show the same spot. */
+  @Volatile private var skipShots = false
+  /** Where the camera must point for this session's photos (degrees, negative = down); null = no check. */
+  @Volatile private var targetGimbalPitch: Double? = null
+  private var lastTiltAt = 0L
+  private var offSince = 0L
+  private var lastWarnAt = 0L
+  /** Bumped when the timer starts or stops: older ticks and shot answers do not reschedule. */
+  private var timerGen = 0
+
+  data class DownloadError(val code: String, val message: String)
+
   var onShootResult: ((sessionId: String, shotIndex: Int, success: Boolean, error: String?) -> Unit)? = null
-  var onDownloadProgress: ((sessionId: String, fileName: String, downloadedBytes: Long, totalBytes: Long, finished: Boolean) -> Unit)? = null
+  /** The camera has been off its target angle for a while (shots are being held back). */
+  var onCameraAngleProblem: ((pitch: Double, target: Double, seconds: Long) -> Unit)? = null
+  /** [index] is 1-based among the [count] photos of this download. */
+  var onDownloadProgress: ((sessionId: String, fileName: String, downloadedBytes: Long, totalBytes: Long, finished: Boolean, index: Int, count: Int) -> Unit)? = null
 
   // ---------- Camera mode ----------
 
@@ -94,49 +157,247 @@ class PhotoCaptureManager(private val context: Context) {
     )
   }
 
+  // ---------- Gimbal ----------
+
+  /**
+   * The gimbal's real pitch (degrees, negative = down), or null when DJI has
+   * no usable reading. An all-zero attitude counts as no reading: the Mini 3
+   * writes pitch 0 / yaw 0 into photos that were plainly taken looking down
+   * (mission 8d84cdf1), so zeros there mean "not reported", not "level".
+   */
+  fun readGimbalPitch(): Double? =
+    try {
+      val a = KeyManager.getInstance().getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitude, componentIndex))
+      if (a == null || (a.pitch == 0.0 && a.roll == 0.0 && a.yaw == 0.0)) null else a.pitch
+    } catch (e: Exception) {
+      null
+    }
+
+  fun tiltGimbal(pitch: Double, onDone: ((success: Boolean, error: String?) -> Unit)? = null) {
+    val rotation = GimbalAngleRotation().apply {
+      mode = GimbalAngleRotationMode.ABSOLUTE_ANGLE
+      this.pitch = pitch
+      roll = 0.0
+      yaw = 0.0
+      pitchIgnored = false
+      rollIgnored = true
+      yawIgnored = true
+      duration = 1.0
+    }
+    KeyManager.getInstance().performAction(
+      KeyTools.createKey(GimbalKey.KeyRotateByAngle, componentIndex),
+      rotation,
+      object : CommonCallbacks.CompletionCallbackWithParam<EmptyMsg> {
+        override fun onSuccess(msg: EmptyMsg?) { onDone?.invoke(true, null) }
+        override fun onFailure(error: IDJIError) {
+          Log.w(TAG, "gimbal tilt to $pitch° failed: ${error.description()}")
+          onDone?.invoke(false, error.description())
+        }
+      },
+    )
+  }
+
+  /** Photos of this session need the camera at [pitch]; null stops checking. Tilts right away. */
+  fun setTargetGimbalPitch(pitch: Double?) {
+    targetGimbalPitch = pitch
+    offSince = 0L
+    if (pitch != null) {
+      lastTiltAt = SystemClock.uptimeMillis()
+      tiltGimbal(pitch)
+    }
+  }
+
+  /**
+   * True when the shot may go ahead. Otherwise the gimbal is (re)tilted and
+   * the caller skips this shot; the pilot is told if it stays off.
+   */
+  private fun cameraAimed(): Boolean {
+    val target = targetGimbalPitch ?: return true
+    val pitch = readGimbalPitch() ?: return true // no reading: don't block the photos
+    val now = SystemClock.uptimeMillis()
+    if (abs(pitch - target) <= GIMBAL_TOLERANCE_DEG) {
+      offSince = 0L
+      return true
+    }
+    if (offSince == 0L) offSince = now
+    if (now - lastTiltAt > GIMBAL_RETRY_MS) {
+      lastTiltAt = now
+      Log.w(TAG, "camera at ${"%.1f".format(pitch)}°, photos need $target°: tilting, shot skipped")
+      tiltGimbal(target)
+    }
+    if (now - offSince > GIMBAL_WARN_EVERY_MS && now - lastWarnAt > GIMBAL_WARN_EVERY_MS) {
+      lastWarnAt = now
+      onCameraAngleProblem?.invoke(pitch, target, (now - offSince) / 1000)
+    }
+    // Still off after the hold: shoot anyway (keep re-tilting and warning).
+    return now - offSince > GIMBAL_MAX_HOLD_MS
+  }
+
   // ---------- Session timer ----------
 
-  fun startSession(sessionId: String, intervalMs: Long): Boolean {
-    if (activeSession != null) {
-      Log.w(TAG, "startSession: existing session ${activeSession?.sessionId} still active; ignoring")
-      return false
+  /**
+   * Starts shooting every [intervalMs]. With [resume] and an existing manifest
+   * for [sessionId], keeps its startedAt, windows and shot count and opens a
+   * new window. Calling it again for the active session just carries on.
+   * False when a different session is active.
+   */
+  fun startSession(sessionId: String, intervalMs: Long, resume: Boolean = false): Boolean {
+    synchronized(lock) {
+      val active = activeSession
+      if (active != null) {
+        if (active.sessionId != sessionId) {
+          Log.w(TAG, "startSession: existing session ${active.sessionId} still active; ignoring")
+          return false
+        }
+        // Same flight asked again (e.g. JS after a native resume): carry on.
+        if (active.paused) resumeLocked(active)
+        return true
+      }
+      val now = System.currentTimeMillis()
+      val interval = intervalMs.coerceAtLeast(MIN_INTERVAL_MS)
+      val previous = if (resume) readManifest(sessionId) else null
+      val session = if (previous != null) {
+        Session(
+          sessionId = sessionId,
+          startedAtMs = previous.optLong("startedAt", now),
+          intervalMs = interval,
+          shotCount = previous.optInt("shotCount", 0),
+          windows = windowsOf(previous, manifestFile(sessionId).lastModified()),
+        )
+      } else {
+        Session(sessionId = sessionId, startedAtMs = now, intervalMs = interval)
+      }
+      session.windows.add(Window(now))
+      activeSession = session
+      saveManifest(session)
+      Log.d(TAG, "startSession sessionId=$sessionId intervalMs=${session.intervalMs} resume=${previous != null} windows=${session.windows.size}")
+      startTimerLocked(session)
+      return true
     }
-    val session = Session(
-      sessionId = sessionId,
-      startedAtMs = System.currentTimeMillis(),
-      intervalMs = intervalMs.coerceAtLeast(1500L), // hard floor: Mini 3 single-shot can't keep up below this
-    )
-    activeSession = session
-    writeManifest(session)
-    Log.d(TAG, "startSession sessionId=$sessionId intervalMs=${session.intervalMs}")
-    timerHandler.post(tickRunnable)
-    return true
   }
+
+  /** Stops the shutter and closes the current window; the session stays. False without a session. */
+  fun pauseSession(): Boolean {
+    synchronized(lock) {
+      val session = activeSession ?: return false
+      if (session.paused) return true
+      session.paused = true
+      stopTimerLocked()
+      closeWindow(session, System.currentTimeMillis())
+      saveManifest(session)
+      Log.d(TAG, "pauseSession sessionId=${session.sessionId} shotCount=${session.shotCount}")
+      return true
+    }
+  }
+
+  /** Opens a new window and restarts the shutter. False without a session. */
+  fun resumeSession(): Boolean {
+    synchronized(lock) {
+      val session = activeSession ?: return false
+      if (session.paused) resumeLocked(session)
+      return true
+    }
+  }
+
+  val isPaused: Boolean
+    get() = synchronized(lock) { activeSession?.paused == true }
 
   fun stopSession(): Session? {
-    val session = activeSession ?: return null
-    timerHandler.removeCallbacks(tickRunnable)
-    session.endedAtMs = System.currentTimeMillis()
-    activeSession = null
-    writeManifest(session)
-    Log.d(TAG, "stopSession sessionId=${session.sessionId} shotCount=${session.shotCount}")
-    return session
+    synchronized(lock) {
+      val session = activeSession ?: return null
+      stopTimerLocked()
+      val now = System.currentTimeMillis()
+      closeWindow(session, now)
+      session.endedAtMs = now
+      session.paused = false
+      activeSession = null
+      targetGimbalPitch = null
+      saveManifest(session)
+      Log.d(TAG, "stopSession sessionId=${session.sessionId} shotCount=${session.shotCount}")
+      return session
+    }
   }
 
-  private val tickRunnable = object : Runnable {
-    override fun run() {
-      val session = activeSession ?: return
-      shootPhoto { success, error ->
-        val index = session.shotCount + 1
-        if (success) {
-          session.shotCount = index
-          writeManifest(session)
-        }
-        onShootResult?.invoke(session.sessionId, index, success, error)
-      }
-      // Schedule next tick regardless of success — failed shutter shouldn't break the cadence
-      timerHandler.postDelayed(this, session.intervalMs)
+  /** The route is climbing in place or taking off: ticks pass without a shot. */
+  fun setSkipShots(skip: Boolean) {
+    skipShots = skip
+  }
+
+  private fun resumeLocked(session: Session) {
+    session.paused = false
+    session.windows.add(Window(System.currentTimeMillis()))
+    saveManifest(session)
+    Log.d(TAG, "resumeSession sessionId=${session.sessionId} windows=${session.windows.size}")
+    startTimerLocked(session)
+  }
+
+  private fun closeWindow(session: Session, now: Long) {
+    val last = session.windows.lastOrNull()
+    if (last != null && last.endMs == null) last.endMs = now
+  }
+
+  private fun startTimerLocked(session: Session) {
+    stopTimerLocked()
+    val gen = timerGen
+    postTick(session, gen, 0L)
+  }
+
+  private fun stopTimerLocked() {
+    timerGen++
+    timerHandler.removeCallbacksAndMessages(TIMER_TOKEN)
+  }
+
+  private fun postTick(session: Session, gen: Int, delayMs: Long) {
+    timerHandler.postAtTime({ tick(session, gen) }, TIMER_TOKEN, SystemClock.uptimeMillis() + delayMs)
+  }
+
+  private fun isCurrent(session: Session, gen: Int): Boolean =
+    synchronized(lock) { activeSession === session && !session.paused && gen == timerGen }
+
+  /** On the timer thread. The next tick is scheduled from the shot's answer, so shots never overlap. */
+  private fun tick(session: Session, gen: Int) {
+    if (!isCurrent(session, gen)) return
+    if (skipShots) {
+      postTick(session, gen, session.intervalMs)
+      return
     }
+    if (!cameraAimed()) {
+      postTick(session, gen, GIMBAL_RECHECK_MS)
+      return
+    }
+    val shotAt = SystemClock.uptimeMillis()
+    val answered = AtomicBoolean(false)
+    val scheduleNext = {
+      // Keep the interval cadence, but never start before the previous shot answered.
+      val wait = (session.intervalMs - (SystemClock.uptimeMillis() - shotAt)).coerceAtLeast(0L)
+      if (isCurrent(session, gen)) postTick(session, gen, wait)
+    }
+    try {
+      shootPhoto { success, error ->
+        if (!answered.compareAndSet(false, true)) return@shootPhoto
+        timerHandler.post {
+          val index: Int
+          synchronized(lock) {
+            index = session.shotCount + 1
+            if (success) {
+              session.shotCount = index
+              saveManifest(session)
+            }
+          }
+          onShootResult?.invoke(session.sessionId, index, success, error)
+          // Failed shutter shouldn't break the cadence
+          scheduleNext()
+        }
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "shootPhoto threw: ${e.message}")
+    }
+    timerHandler.postAtTime({
+      if (answered.compareAndSet(false, true)) {
+        Log.w(TAG, "shutter did not answer within ${SHOT_TIMEOUT_MS / 1000} s; carrying on")
+        scheduleNext()
+      }
+    }, TIMER_TOKEN, shotAt + SHOT_TIMEOUT_MS)
   }
 
   // ---------- Local storage helpers ----------
@@ -144,18 +405,39 @@ class PhotoCaptureManager(private val context: Context) {
   private fun capturesRoot(): File = File(context.filesDir, "captures").apply { if (!exists()) mkdirs() }
   private fun sessionDir(sessionId: String): File =
     File(capturesRoot(), sessionId).apply { if (!exists()) mkdirs() }
-  private fun manifestFile(sessionId: String): File = File(sessionDir(sessionId), "manifest.json")
+  // Reading must not create an empty session folder.
+  private fun manifestFile(sessionId: String): File = File(File(capturesRoot(), sessionId), "manifest.json")
 
-  private fun writeManifest(session: Session) {
+  /** Snapshot under the lock; written on the timer thread only (temp file + rename). */
+  private fun saveManifest(session: Session) {
+    val json = JSONObject().apply {
+      put("sessionId", session.sessionId)
+      put("startedAt", session.startedAtMs)
+      put("endedAt", session.endedAtMs ?: JSONObject.NULL)
+      put("intervalMs", session.intervalMs)
+      put("shotCount", session.shotCount)
+      put("windows", JSONArray().apply {
+        session.windows.forEach { w ->
+          put(JSONObject().apply {
+            put("start", w.startMs)
+            put("end", w.endMs ?: JSONObject.NULL)
+          })
+        }
+      })
+    }.toString()
+    val sessionId = session.sessionId
+    timerHandler.post { writeManifest(sessionId, json) }
+  }
+
+  private fun writeManifest(sessionId: String, json: String) {
     try {
-      val json = JSONObject().apply {
-        put("sessionId", session.sessionId)
-        put("startedAt", session.startedAtMs)
-        put("endedAt", session.endedAtMs ?: JSONObject.NULL)
-        put("intervalMs", session.intervalMs)
-        put("shotCount", session.shotCount)
+      val target = File(sessionDir(sessionId), "manifest.json")
+      val tmp = File(target.parentFile, "manifest.json.tmp")
+      tmp.writeText(json)
+      if (!tmp.renameTo(target)) {
+        Log.w(TAG, "writeManifest: rename failed")
+        tmp.delete()
       }
-      manifestFile(session.sessionId).writeText(json.toString())
     } catch (e: Exception) {
       Log.w(TAG, "writeManifest failed: ${e.message}")
     }
@@ -165,6 +447,31 @@ class PhotoCaptureManager(private val context: Context) {
     val f = manifestFile(sessionId)
     if (!f.exists()) return null
     return try { JSONObject(f.readText()) } catch (e: Exception) { null }
+  }
+
+  /**
+   * The manifest's windows (closing one left open, e.g. by a crash, at
+   * [openEndFallback]); older manifests without windows count as one window.
+   */
+  private fun windowsOf(manifest: JSONObject, openEndFallback: Long): MutableList<Window> {
+    val out = mutableListOf<Window>()
+    val array = manifest.optJSONArray("windows")
+    if (array != null) {
+      for (i in 0 until array.length()) {
+        val w = array.optJSONObject(i) ?: continue
+        val start = w.optLong("start", 0L)
+        if (start <= 0L) continue
+        val end = if (w.isNull("end")) null else w.optLong("end")
+        out.add(Window(start, end ?: openEndFallback))
+      }
+    } else {
+      val start = manifest.optLong("startedAt", 0L)
+      if (start > 0L) {
+        val end = if (manifest.isNull("endedAt")) null else manifest.optLong("endedAt")
+        out.add(Window(start, end ?: openEndFallback))
+      }
+    }
+    return out
   }
 
   fun listSessionIds(): List<String> =
@@ -185,33 +492,64 @@ class PhotoCaptureManager(private val context: Context) {
 
   // ---------- Bulk download (post-flight) ----------
 
+  /** One download; completes exactly once. */
+  private inner class DownloadRun(
+    val sessionId: String,
+    private val onComplete: (downloaded: Int, skipped: Int, failed: Int, error: DownloadError?) -> Unit,
+  ) {
+    @Volatile var cancelled = false
+    @Volatile var current: MediaFile? = null
+    @Volatile var downloaded = 0
+    @Volatile var skipped = 0
+    @Volatile var failed = 0
+    private val completed = AtomicBoolean(false)
+
+    fun complete(error: DownloadError?, mediaManagerOn: Boolean = true) {
+      if (!completed.compareAndSet(false, true)) return
+      synchronized(lock) { if (activeDownload === this) activeDownload = null }
+      current = null
+      val report = { onComplete(downloaded, skipped, failed, error) }
+      if (mediaManagerOn) disableMediaManagerThen(report) else report()
+    }
+  }
+
+  @Volatile private var activeDownload: DownloadRun? = null
+
   /**
-   * Downloads every photo on the drone's SD card created within the session window.
-   * Calls onComplete(downloadedCount, skippedCount, errorOrNull) when finished.
+   * Downloads the photos on the drone's SD card taken inside this session's
+   * windows. Refuses in the air (IN_FLIGHT), without a manifest (NO_SESSION,
+   * no whole-card fallback) and while another download runs (DOWNLOAD_BUSY).
+   * Ends with CANCELLED after cancelDownload, STORAGE when the phone cannot
+   * store a photo.
    */
   fun downloadSessionPhotos(
     sessionId: String,
-    onComplete: (downloaded: Int, skipped: Int, error: String?) -> Unit
+    onComplete: (downloaded: Int, skipped: Int, failed: Int, error: DownloadError?) -> Unit
   ) {
-    // If a session manifest exists, filter to that flight's time window.
-    // If not (capture never started in-app, or photos predate it), fall back to
-    // pulling EVERY JPG on the SD card so the user still gets their photos.
+    val flying = try { FlightControllerKey.KeyIsFlying.create().get(false) == true } catch (e: Exception) { false }
+    if (flying) {
+      return onComplete(0, 0, 0, DownloadError("IN_FLIGHT", "Land first: DJI only reads the drone's SD card on the ground"))
+    }
+    // The flight is over when its photos are fetched: no shutter during the download.
+    if (activeSession?.sessionId == sessionId) stopSession()
     val manifest = readManifest(sessionId)
-    val startedAt: Long
-    val endedAt: Long
-    if (manifest == null) {
-      Log.w(TAG, "downloadSessionPhotos: no manifest for $sessionId — pulling ALL SD photos")
-      startedAt = 0L
-      endedAt = Long.MAX_VALUE
-    } else {
-      startedAt = manifest.getLong("startedAt")
-      // 60s buffer to catch photos written just after stopSession (shutter race)
-      endedAt = (manifest.optLong("endedAt", System.currentTimeMillis())) + 60_000L
+      ?: return onComplete(0, 0, 0, DownloadError("NO_SESSION", "No photos from this flight"))
+    val windows = windowsOf(manifest, manifest.optLong("endedAt", 0L).takeIf { it > 0 } ?: System.currentTimeMillis())
+    if (windows.isEmpty()) return onComplete(0, 0, 0, DownloadError("NO_SESSION", "No photos from this flight"))
+    val ranges = windows.map { (it.startMs - WINDOW_HEAD_MS)..((it.endMs ?: System.currentTimeMillis()) + WINDOW_TAIL_MS) }
+
+    val run = DownloadRun(sessionId, onComplete)
+    synchronized(lock) {
+      if (activeDownload != null) {
+        return onComplete(0, 0, 0, DownloadError("DOWNLOAD_BUSY", "A photo download is already running"))
+      }
+      activeDownload = run
     }
 
     val mediaManager = MediaDataCenter.getInstance().mediaManager
     mediaManager.enable(object : CommonCallbacks.CompletionCallback {
       override fun onSuccess() {
+        if (run.cancelled) return run.complete(DownloadError("CANCELLED", "Download cancelled"))
         val source = MediaFileListDataSource.Builder()
           .setIndexType(componentIndex)
           .setLocation(CameraStorageLocation.SDCARD)
@@ -220,95 +558,164 @@ class PhotoCaptureManager(private val context: Context) {
         mediaManager.pullMediaFileListFromCamera(
           // -1 / -1 = "all files from the start". DJI rejects fixed index/count
           // ranges on several cameras (causes FETCH_FILE_LIST_FAILED), so always
-          // request the full list. We filter to the session window ourselves.
+          // request the full list. We filter to the session windows ourselves.
           PullMediaFileListParam.Builder().mediaFileIndex(-1).count(-1).build(),
           object : CommonCallbacks.CompletionCallback {
             override fun onSuccess() {
               val data: MediaFileListData? = mediaManager.mediaFileListData
               val files = data?.data ?: emptyList()
-              val toDownload = files.filter {
-                if (!it.fileName.endsWith(".JPG", ignoreCase = true)) return@filter false
-                val createdMs = mediaFileCreatedMs(it) ?: return@filter false
-                createdMs in startedAt..endedAt
+              val toDownload = files.filter { file ->
+                if (!file.fileName.endsWith(".JPG", ignoreCase = true)) return@filter false
+                val createdMs = mediaFileCreatedMs(file) ?: return@filter false
+                ranges.any { createdMs in it }
               }
-              Log.d(TAG, "downloadSessionPhotos sessionId=$sessionId matched=${toDownload.size}/${files.size} window=[$startedAt,$endedAt]")
-              downloadSequentially(sessionId, toDownload, 0, 0, 0) { downloaded, skipped, error ->
-                disableMediaManagerThen { onComplete(downloaded, skipped, error) }
-              }
+              Log.d(TAG, "downloadSessionPhotos sessionId=$sessionId matched=${toDownload.size}/${files.size} windows=${ranges.size}")
+              downloadFrom(run, toDownload, 0)
             }
             override fun onFailure(error: IDJIError) {
-              disableMediaManagerThen { onComplete(0, 0, "pullMediaFileList failed: ${error.description()}") }
+              run.complete(DownloadError("DOWNLOAD_FAILED", "Could not read the drone's photo list: ${error.description()}"))
             }
           }
         )
       }
       override fun onFailure(error: IDJIError) {
-        onComplete(0, 0, "mediaManager.enable failed: ${error.description()}")
+        run.complete(DownloadError("DOWNLOAD_FAILED", "Could not open the drone's SD card: ${error.description()}"), mediaManagerOn = false)
       }
     })
+  }
+
+  /** Stops the running download (it ends with CANCELLED). False when none runs. */
+  fun cancelDownload(): Boolean {
+    val run = activeDownload ?: return false
+    run.cancelled = true
+    try {
+      run.current?.stopPullOriginalMediaFileFromCamera(object : CommonCallbacks.CompletionCallback {
+        override fun onSuccess() {}
+        override fun onFailure(error: IDJIError) { Log.w(TAG, "stop pull: ${error.description()}") }
+      })
+    } catch (e: Exception) {
+      Log.w(TAG, "stop pull threw: ${e.message}")
+    }
+    // DJI may not answer a stopped pull at all; the download must still end.
+    timerHandler.postDelayed({ run.complete(DownloadError("CANCELLED", "Download cancelled")) }, CANCEL_FALLBACK_MS)
+    return true
   }
 
   private fun disableMediaManagerThen(then: () -> Unit) {
-    MediaDataCenter.getInstance().mediaManager.disable(object : CommonCallbacks.CompletionCallback {
-      override fun onSuccess() { then() }
-      override fun onFailure(error: IDJIError) {
-        Log.w(TAG, "mediaManager.disable failed: ${error.description()}")
-        then()
-      }
-    })
+    try {
+      MediaDataCenter.getInstance().mediaManager.disable(object : CommonCallbacks.CompletionCallback {
+        override fun onSuccess() { then() }
+        override fun onFailure(error: IDJIError) {
+          Log.w(TAG, "mediaManager.disable failed: ${error.description()}")
+          then()
+        }
+      })
+    } catch (e: Exception) {
+      Log.w(TAG, "mediaManager.disable threw: ${e.message}")
+      then()
+    }
   }
 
-  private fun downloadSequentially(
-    sessionId: String,
-    files: List<MediaFile>,
-    index: Int,
-    downloaded: Int,
-    skipped: Int,
-    onAllDone: (downloaded: Int, skipped: Int, error: String?) -> Unit,
-  ) {
-    if (index >= files.size) {
-      onAllDone(downloaded, skipped, null)
-      return
+  private fun downloadFrom(run: DownloadRun, files: List<MediaFile>, from: Int) {
+    val dir = sessionDir(run.sessionId)
+    var index = from
+    // Already on the phone: skip (a loop, not recursion).
+    while (index < files.size && File(dir, files[index].fileName).let { it.exists() && it.length() > 0 }) {
+      run.skipped++
+      index++
     }
+    if (run.cancelled) return run.complete(DownloadError("CANCELLED", "Download cancelled"))
+    if (index >= files.size) return run.complete(null)
+
     val mediaFile = files[index]
-    val outFile = File(sessionDir(sessionId), mediaFile.fileName)
-    if (outFile.exists() && outFile.length() > 0) {
-      // Already downloaded — skip
-      downloadSequentially(sessionId, files, index + 1, downloaded, skipped + 1, onAllDone)
-      return
+    val number = index + 1
+    val count = files.size
+    val outFile = File(dir, mediaFile.fileName)
+    val tmpFile = File(dir, "${mediaFile.fileName}.part")
+    val out: OutputStream = try {
+      BufferedOutputStream(FileOutputStream(tmpFile, false))
+    } catch (e: Exception) {
+      return run.complete(DownloadError("STORAGE", "The phone could not store ${mediaFile.fileName}: ${e.message}"))
     }
-    val tmpFile = File(sessionDir(sessionId), "${mediaFile.fileName}.part")
-    val outputStream = FileOutputStream(tmpFile, false)
-    val bos = BufferedOutputStream(outputStream)
-    mediaFile.pullOriginalMediaFileFromCamera(0L, object : MediaFileDownloadListener {
-      override fun onStart() {}
-      override fun onProgress(total: Long, current: Long) {
-        onDownloadProgress?.invoke(sessionId, mediaFile.fileName, current, total, false)
-      }
-      override fun onRealtimeDataUpdate(data: ByteArray, position: Long) {
-        try { bos.write(data); bos.flush() } catch (e: Exception) { Log.e(TAG, "write failed: ${e.message}") }
-      }
-      override fun onFinish() {
-        try { bos.close(); outputStream.close() } catch (_: Exception) {}
-        if (!tmpFile.renameTo(outFile)) {
-          Log.w(TAG, "rename tmp -> ${outFile.name} failed")
+    // Set on DJI's data thread, read when the file ends.
+    val writeError = AtomicReference<String?>(null)
+    var lastProgressAt = 0L
+    val fileDone = AtomicBoolean(false)
+    run.current = mediaFile
+    try {
+      mediaFile.pullOriginalMediaFileFromCamera(0L, object : MediaFileDownloadListener {
+        override fun onStart() {}
+        override fun onProgress(total: Long, current: Long) {
+          val now = SystemClock.uptimeMillis()
+          if (now - lastProgressAt < PROGRESS_MIN_INTERVAL_MS && current < total) return
+          lastProgressAt = now
+          onDownloadProgress?.invoke(run.sessionId, mediaFile.fileName, current, total, false, number, count)
         }
-        onDownloadProgress?.invoke(sessionId, mediaFile.fileName, outFile.length(), outFile.length(), true)
-        downloadSequentially(sessionId, files, index + 1, downloaded + 1, skipped, onAllDone)
-      }
-      override fun onFailure(error: IDJIError?) {
-        try { bos.close(); outputStream.close() } catch (_: Exception) {}
-        tmpFile.delete()
-        Log.e(TAG, "download failed for ${mediaFile.fileName}: ${error?.description()}")
-        downloadSequentially(sessionId, files, index + 1, downloaded, skipped, onAllDone)
-      }
-    })
+        override fun onRealtimeDataUpdate(data: ByteArray, position: Long) {
+          if (writeError.get() != null) return
+          try {
+            out.write(data)
+          } catch (e: Exception) {
+            // Storage full (or gone): stop pulling instead of writing a broken photo.
+            writeError.set(e.message ?: e.toString())
+            Log.e(TAG, "write failed: ${writeError.get()}")
+            try {
+              mediaFile.stopPullOriginalMediaFileFromCamera(object : CommonCallbacks.CompletionCallback {
+                override fun onSuccess() {}
+                override fun onFailure(error: IDJIError) {}
+              })
+            } catch (_: Exception) {}
+            // The pull may never answer once stopped.
+            timerHandler.postDelayed({ finishFile(null) }, CANCEL_FALLBACK_MS)
+          }
+        }
+        override fun onFinish() = finishFile(null)
+        override fun onFailure(error: IDJIError?) = finishFile(error?.description() ?: "unknown error")
+
+        private fun finishFile(pullError: String?) {
+          if (!fileDone.compareAndSet(false, true)) return
+          val closeError = try { out.close(); null } catch (e: Exception) { e.message ?: e.toString() }
+          val storageError = writeError.get() ?: if (pullError == null) closeError else null
+          when {
+            storageError != null -> {
+              tmpFile.delete()
+              run.complete(DownloadError("STORAGE", "The phone could not store ${mediaFile.fileName}: $storageError"))
+            }
+            run.cancelled -> {
+              tmpFile.delete()
+              run.complete(DownloadError("CANCELLED", "Download cancelled"))
+            }
+            pullError != null -> {
+              tmpFile.delete()
+              run.failed++
+              Log.e(TAG, "download failed for ${mediaFile.fileName}: $pullError")
+              downloadFrom(run, files, index + 1)
+            }
+            !tmpFile.renameTo(outFile) -> {
+              tmpFile.delete()
+              run.complete(DownloadError("STORAGE", "The phone could not save ${mediaFile.fileName}"))
+            }
+            else -> {
+              run.downloaded++
+              onDownloadProgress?.invoke(run.sessionId, mediaFile.fileName, outFile.length(), outFile.length(), true, number, count)
+              downloadFrom(run, files, index + 1)
+            }
+          }
+        }
+      })
+    } catch (e: Exception) {
+      try { out.close() } catch (_: Exception) {}
+      tmpFile.delete()
+      run.complete(DownloadError("DOWNLOAD_FAILED", "Could not download ${mediaFile.fileName}: ${e.message}"))
+    }
   }
 
   fun release() {
-    timerHandler.removeCallbacksAndMessages(null)
+    synchronized(lock) {
+      stopTimerLocked()
+      activeSession = null
+    }
     timerThread.quitSafely()
-    activeSession = null
   }
 
   /**
